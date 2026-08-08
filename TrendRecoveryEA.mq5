@@ -1,7 +1,8 @@
 #property strict
-#property version   "1.10"
+#property version   "1.20"
 #property description "Trend following EA with controlled recovery, profit protection and hard risk limits."
 #include <Trade/Trade.mqh>
+#include "modules/ExitEngine.mqh"
 CTrade trade;
 
 enum TrendDirection { TREND_NONE=0, TREND_BUY=1, TREND_SELL=-1 };
@@ -45,6 +46,9 @@ input double ProfitLockOffsetUSD=3.0;
 input bool UseATRTrailing=true;
 input double ATRTrailingMultiplier=2.0;
 input double ATRTrailingStartUSD=10.0;
+input double CampaignProfitTargetUSD=0.0;
+input double CampaignProfitTrailStartUSD=10.0;
+input double CampaignProfitGivebackUSD=3.0;
 
 //---------- RECOVERY SETTINGS ----------
 input bool UseRecovery=true;
@@ -94,6 +98,7 @@ datetime g_lastEntryTime=0,g_lastBarTime=0;
 TrendDirection g_lastTrend=TREND_NONE;
 CampaignState g_state=CAMPAIGN_IDLE;
 bool g_closePending=false;
+ExitSnapshot g_exitSnapshot;
 
 string GVPeak(){return "TRENDREC_PEAK_"+(string)MagicNumber+"_"+_Symbol;}
 string GVDaily(){return "TRENDREC_DAYEQ_"+(string)MagicNumber+"_"+_Symbol;}
@@ -326,10 +331,72 @@ void RiskEngine()
    if(MaxCampaignHours>0&&CountPositions()>0){datetime start=GetCampaignStartTime();if(start>0&&TimeCurrent()-start>=MaxCampaignHours*3600){Log("Maximum campaign duration reached.");CloseCampaign();}}
 }
 
+void ResetExitState()
+{
+   ResetExitSnapshot(g_exitSnapshot);
+}
+
+bool CampaignExitEngine()
+{
+   if(CountPositions()<=0)
+      return false;
+
+   double basket=GetBasketProfit();
+   UpdateExitSnapshot(g_exitSnapshot,basket);
+
+   if(ExitLossReached(g_exitSnapshot,MaxCampaignLossUSD))
+   {
+      Log("ExitEngine: campaign loss limit reached.");
+      CloseCampaign();
+      return true;
+   }
+
+   if(ExitDurationReached(GetCampaignStartTime(),MaxCampaignHours))
+   {
+      Log("ExitEngine: campaign timeout reached.");
+      CloseCampaign();
+      return true;
+   }
+
+   if(ExitTargetReached(g_exitSnapshot,CampaignProfitTargetUSD))
+   {
+      Log("ExitEngine: campaign profit target reached.");
+      CloseCampaign();
+      return true;
+   }
+
+   if(CampaignProfitGivebackUSD>0.0 &&
+      g_exitSnapshot.peakProfit>=CampaignProfitTrailStartUSD &&
+      ExitDrawdownReached(g_exitSnapshot,CampaignProfitGivebackUSD))
+   {
+      Log("ExitEngine: campaign profit giveback reached.");
+      CloseCampaign();
+      return true;
+   }
+
+   return false;
+}
+
 void ManagePositions(TrendDirection trend)
 {
-   if(CountPositions()==0){if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}
-   ProfitEngine();if(CountRecoveryPositions()>0)RecoveryEngine();else{g_state=(GetBasketProfit()>0)?CAMPAIGN_PROFIT:CAMPAIGN_TREND;CheckTrendReversal(trend);}
+   if(CountPositions()==0)
+   {
+      ResetExitState();
+      if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;
+      return;
+   }
+
+   if(CampaignExitEngine())
+      return;
+
+   ProfitEngine();
+   if(CountRecoveryPositions()>0)
+      RecoveryEngine();
+   else
+   {
+      g_state=(GetBasketProfit()>0)?CAMPAIGN_PROFIT:CAMPAIGN_TREND;
+      CheckTrendReversal(trend);
+   }
 }
 
 void EntryEngine(TrendDirection trend){if(g_state==CAMPAIGN_LOCKED||g_closePending||CountPositions()>0||trend==TREND_NONE)return;if(CanOpenEntry(trend))ExecuteEntry(trend);}
@@ -337,6 +404,7 @@ void UpdateTrendLog(TrendDirection trend){if(!LogTrendChanges||trend==g_lastTren
 
 int OnInit()
 {
+   ResetExitState();
    trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);
    hFastEMA=iMA(_Symbol,TrendTimeframe,FastEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hSlowEMA=iMA(_Symbol,TrendTimeframe,SlowEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hTrendEMA=iMA(_Symbol,TrendTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFEMA=iMA(_Symbol,HigherTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hADX=iADX(_Symbol,TrendTimeframe,ADXPeriod);hATR=iATR(_Symbol,TrendTimeframe,14);hRSI=iRSI(_Symbol,TrendTimeframe,RSIPeriod,PRICE_CLOSE);
    if(hFastEMA<0||hSlowEMA<0||hTrendEMA<0||hHTFEMA<0||hADX<0||hATR<0||hRSI<0){Log("Indicator initialization failed.");return INIT_FAILED;}
