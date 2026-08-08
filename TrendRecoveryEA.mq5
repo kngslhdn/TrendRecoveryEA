@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.21"
+#property version   "1.22"
 #property description "Trend following EA with controlled recovery, profit protection and hard risk limits."
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -28,7 +28,7 @@ input double MaxLot=0.10;
 input int EntryCooldownSeconds=900;
 input int MaximumPositions=1;
 input double MinimumEntryDistance=0.0;
-input double MaximumSpread=80.0;
+input double MaximumSpread=150.0;
 input long MagicNumber=26080901;
 input int SlippagePoints=30;
 
@@ -150,8 +150,11 @@ bool TradeSucceeded()
 
 bool IsSpreadAcceptable()
 {
-   if(MaximumSpread<=0)return true;MqlTick tick;if(!SymbolInfoTick(_Symbol,tick))return false;
-   return (tick.ask-tick.bid)/_Point<=MaximumSpread;
+   if(MaximumSpread<=0)return true;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))return false;
+   double spreadPoints=(tick.ask-tick.bid)/_Point;
+   return spreadPoints<=MaximumSpread;
 }
 
 bool IsTradingSession()
