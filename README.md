@@ -4,8 +4,6 @@ MetaTrader 5 Expert Advisor for trend following with controlled recovery, profit
 
 ## Core idea
 
-The EA is designed around:
-
 **Trend → Entry → Profit Management → Recovery → Exit → Protection**
 
 ## Target
@@ -14,17 +12,10 @@ The EA is designed around:
 - Compatible with broker suffixes such as XAUUSDm, XAUUSDc, and similar variants
 - Designed for MT5 Strategy Tester and live deployment
 
-## Planned modules
-
-- Trend engine
-- Entry engine
-- Position management
-- Profit engine
-- Recovery engine
-- Risk engine
-- Exit engine
-- Utility functions
-
 ## Status
 
-Repository scaffold created. Main EA source will be added next as `TrendRecoveryEA.mq5`.
+v1 core EA has been built in `TrendRecoveryEA.mq5`.
+
+## Important
+
+Compile in MetaEditor 5 before live use. The repository build is intended for code review and Strategy Tester validation; profitability is not guaranteed.
