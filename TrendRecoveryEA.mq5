@@ -1,8 +1,7 @@
 #property strict
-#property version   "1.20"
+#property version   "1.21"
 #property description "Trend following EA with controlled recovery, profit protection and hard risk limits."
 #include <Trade/Trade.mqh>
-#include "modules/ExitEngine.mqh"
 CTrade trade;
 
 enum TrendDirection { TREND_NONE=0, TREND_BUY=1, TREND_SELL=-1 };
@@ -46,6 +45,8 @@ input double ProfitLockOffsetUSD=3.0;
 input bool UseATRTrailing=true;
 input double ATRTrailingMultiplier=2.0;
 input double ATRTrailingStartUSD=10.0;
+
+//---------- CAMPAIGN EXIT SETTINGS ----------
 input double CampaignProfitTargetUSD=0.0;
 input double CampaignProfitTrailStartUSD=10.0;
 input double CampaignProfitGivebackUSD=3.0;
@@ -98,7 +99,25 @@ datetime g_lastEntryTime=0,g_lastBarTime=0;
 TrendDirection g_lastTrend=TREND_NONE;
 CampaignState g_state=CAMPAIGN_IDLE;
 bool g_closePending=false;
+
+//---------- EMBEDDED EXIT ENGINE ----------
+// Kept inside the EA so MetaEditor does not require a local .mqh dependency.
+struct ExitSnapshot
+{
+   double profit;
+   double peakProfit;
+   double drawdownFromPeak;
+   int positions;
+};
 ExitSnapshot g_exitSnapshot;
+
+void ResetExitSnapshot(ExitSnapshot &s)
+{
+   s.profit=0.0;
+   s.peakProfit=0.0;
+   s.drawdownFromPeak=0.0;
+   s.positions=0;
+}
 
 string GVPeak(){return "TRENDREC_PEAK_"+(string)MagicNumber+"_"+_Symbol;}
 string GVDaily(){return "TRENDREC_DAYEQ_"+(string)MagicNumber+"_"+_Symbol;}
@@ -295,7 +314,7 @@ bool CloseCampaign()
 {
    bool requestOK=true;g_state=CAMPAIGN_EXIT;
    for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);bool sent=trade.PositionClose(t);if(!sent||!TradeSucceeded()){requestOK=false;Log("Close failed ticket="+(string)t+" retcode="+(string)trade.ResultRetcode()+" "+trade.ResultRetcodeDescription());}}
-   g_closePending=(CountPositions()>0);if(!g_closePending&&requestOK)g_state=CAMPAIGN_IDLE;return requestOK;
+   g_closePending=(CountPositions()>0);if(!g_closePending&&requestOK){g_state=CAMPAIGN_IDLE;ResetExitSnapshot(g_exitSnapshot);}return requestOK;
 }
 
 bool StartRecovery(TrendDirection reversal)
@@ -331,72 +350,40 @@ void RiskEngine()
    if(MaxCampaignHours>0&&CountPositions()>0){datetime start=GetCampaignStartTime();if(start>0&&TimeCurrent()-start>=MaxCampaignHours*3600){Log("Maximum campaign duration reached.");CloseCampaign();}}
 }
 
-void ResetExitState()
+void UpdateExitSnapshot(ExitSnapshot &s,double currentProfit)
 {
-   ResetExitSnapshot(g_exitSnapshot);
+   s.profit=currentProfit;
+   if(currentProfit>s.peakProfit)s.peakProfit=currentProfit;
+   s.drawdownFromPeak=s.peakProfit-currentProfit;
+   s.positions=CountPositions();
 }
+
+bool ExitTargetReached(const ExitSnapshot &s,double targetUSD){return targetUSD>0.0&&s.profit>=targetUSD;}
+bool ExitDrawdownReached(const ExitSnapshot &s,double trailUSD){return trailUSD>0.0&&s.peakProfit>0.0&&s.drawdownFromPeak>=trailUSD;}
+bool ExitLossReached(const ExitSnapshot &s,double maxLossUSD){return maxLossUSD>0.0&&s.profit<=-maxLossUSD;}
+bool ExitDurationReached(datetime startTime,int maxHours){if(startTime<=0||maxHours<=0)return false;return (TimeCurrent()-startTime)>=(maxHours*3600);}
+
+void ResetExitState(){ResetExitSnapshot(g_exitSnapshot);}
 
 bool CampaignExitEngine()
 {
-   if(CountPositions()<=0)
-      return false;
-
+   if(CountPositions()<=0){ResetExitState();return false;}
    double basket=GetBasketProfit();
    UpdateExitSnapshot(g_exitSnapshot,basket);
-
-   if(ExitLossReached(g_exitSnapshot,MaxCampaignLossUSD))
-   {
-      Log("ExitEngine: campaign loss limit reached.");
-      CloseCampaign();
-      return true;
-   }
-
-   if(ExitDurationReached(GetCampaignStartTime(),MaxCampaignHours))
-   {
-      Log("ExitEngine: campaign timeout reached.");
-      CloseCampaign();
-      return true;
-   }
-
-   if(ExitTargetReached(g_exitSnapshot,CampaignProfitTargetUSD))
-   {
-      Log("ExitEngine: campaign profit target reached.");
-      CloseCampaign();
-      return true;
-   }
-
-   if(CampaignProfitGivebackUSD>0.0 &&
-      g_exitSnapshot.peakProfit>=CampaignProfitTrailStartUSD &&
-      ExitDrawdownReached(g_exitSnapshot,CampaignProfitGivebackUSD))
-   {
-      Log("ExitEngine: campaign profit giveback reached.");
-      CloseCampaign();
-      return true;
-   }
-
+   if(ExitLossReached(g_exitSnapshot,MaxCampaignLossUSD)){Log("ExitEngine: campaign loss limit reached.");CloseCampaign();return true;}
+   if(ExitDurationReached(GetCampaignStartTime(),MaxCampaignHours)){Log("ExitEngine: campaign timeout reached.");CloseCampaign();return true;}
+   if(ExitTargetReached(g_exitSnapshot,CampaignProfitTargetUSD)){Log("ExitEngine: campaign profit target reached.");CloseCampaign();return true;}
+   if(CampaignProfitTrailStartUSD>0.0&&CampaignProfitGivebackUSD>0.0&&g_exitSnapshot.peakProfit>=CampaignProfitTrailStartUSD&&ExitDrawdownReached(g_exitSnapshot,CampaignProfitGivebackUSD)){Log("ExitEngine: campaign profit giveback reached.");CloseCampaign();return true;}
    return false;
 }
 
 void ManagePositions(TrendDirection trend)
 {
-   if(CountPositions()==0)
-   {
-      ResetExitState();
-      if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;
-      return;
-   }
-
-   if(CampaignExitEngine())
-      return;
-
+   if(CountPositions()==0){ResetExitState();if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}
+   if(CampaignExitEngine())return;
    ProfitEngine();
-   if(CountRecoveryPositions()>0)
-      RecoveryEngine();
-   else
-   {
-      g_state=(GetBasketProfit()>0)?CAMPAIGN_PROFIT:CAMPAIGN_TREND;
-      CheckTrendReversal(trend);
-   }
+   if(CountRecoveryPositions()>0)RecoveryEngine();
+   else{g_state=(GetBasketProfit()>0)?CAMPAIGN_PROFIT:CAMPAIGN_TREND;CheckTrendReversal(trend);}
 }
 
 void EntryEngine(TrendDirection trend){if(g_state==CAMPAIGN_LOCKED||g_closePending||CountPositions()>0||trend==TREND_NONE)return;if(CanOpenEntry(trend))ExecuteEntry(trend);}
