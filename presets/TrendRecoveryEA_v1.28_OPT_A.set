@@ -1,0 +1,82 @@
+; TrendRecoveryEA v1.28 - Optimization A
+; Objective: reduce false recovery and reduce average loss without changing entry logic
+; Baseline backtest: Net +564.82 | PF 1.18 | Equity DD 10.16% | Win 77.48%
+; Changes from v1.28 baseline:
+; RecoveryTriggerUSD 5.0 -> 8.0
+; RecoverySL_ATR 1.50 -> 1.75
+; RecoveryMaxLossPerTradeUSD 8.0 -> 6.0
+; RecoveryConfirmationBars 3 -> 4
+; ProfitLockStartUSD 12 -> 10
+; ATRTrailingStartUSD 15 -> 12
+; DO NOT increase lot size for this test.
+
+TrendTimeframe=15
+HigherTimeframe=16385
+FastEMAPeriod=20
+SlowEMAPeriod=50
+TrendEMAPeriod=200
+ADXPeriod=14
+MinimumADX=15.0
+MaximumATRPoints=0.0
+UseRSIConfirmation=false
+RSIPeriod=14
+RSIForBuy=50.0
+RSIForSell=50.0
+ReversalConfirmationBars=2
+InitialLot=0.01
+MaxLot=0.10
+EntryCooldownSeconds=900
+MaximumPositions=1
+MinimumEntryDistance=0.0
+MaximumSpread=300.0
+MagicNumber=26080901
+SlippagePoints=30
+UseInitialSL=true
+InitialSL_ATR=1.75
+UseBreakEven=true
+BreakEvenStartUSD=6.0
+BreakEvenOffsetUSD=0.20
+UseProfitLock=true
+ProfitLockStepUSD=3.0
+ProfitLockStartUSD=10.0
+ProfitLockOffsetUSD=5.0
+UseATRTrailing=true
+ATRTrailingMultiplier=1.8
+ATRTrailingStartUSD=12.0
+CampaignProfitTargetUSD=0.0
+CampaignProfitTrailStartUSD=10.0
+CampaignProfitGivebackUSD=3.0
+UseRecovery=true
+RecoveryTriggerUSD=8.0
+RecoveryMultiplier=1.0
+MaxRecoveryLot=0.05
+MaxRecoveryPositions=1
+RecoveryTargetUSD=1.0
+RecoveryMinProfitUSD=0.0
+RecoveryMaxLossUSD=50.0
+RecoverySL_ATR=1.75
+RecoveryMaxLossPerTradeUSD=6.0
+RecoveryConfirmationBars=4
+CloseOnStrongReversalIfNoRecovery=true
+RecoveryLockStartUSD=2.0
+RecoveryLockProfitUSD=1.0
+RecoveryTrailStartUSD=5.0
+RecoveryTrailGivebackUSD=2.0
+MaxCampaignLossUSD=100.0
+MaxCampaignHours=24
+MaximumExposurePositions=2
+MaxEquityDrawdownPercent=15.0
+ClosePositionsOnEquityProtection=true
+MaxDailyLossUSD=0.0
+MaxDailyLossPercent=0.0
+ClosePositionsOnDailyProtection=true
+UseTradingSession=true
+TradingStartHour=13
+TradingEndHour=23
+UseEquityScaling=false
+BaseEquity=1500.0
+BaseLot=0.01
+RequireHedgingAccountForRecovery=true
+UseNewBarForEntry=true
+EnableLogging=true
+LogTrendChanges=true
