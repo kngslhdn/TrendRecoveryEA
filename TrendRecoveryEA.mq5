@@ -153,20 +153,151 @@ void PositionProtection(ulong ticket){if(!PositionSelectByTicket(ticket))return;
 void ProfitEngine(){for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;PositionProtection(t);}}
 
 bool StartRecovery(TrendDirection rev){
-   if(!UseRecovery||CountRecoveryPositions()>=MaxRecoveryPositions)return false;
-   if(!IsHedgingAccount()&&RequireHedgingAccountForRecovery){Log("Recovery skipped: non-hedging account.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
+   if(!UseRecovery)
+   {
+      Log("Recovery skipped: UseRecovery=false.");
+      return false;
+   }
+
+   if(rev==TREND_NONE)
+   {
+      Log("Recovery rejected: invalid reversal direction.");
+      return false;
+   }
+
+   // Only one recovery position is allowed by design.
+   if(CountRecoveryPositions()>=MaxRecoveryPositions)
+   {
+      Log("Recovery skipped: maximum recovery positions reached.");
+      return false;
+   }
+
+   // Account type requirement for recovery.
+   if(RequireHedgingAccountForRecovery && !IsHedgingAccount())
+   {
+      Log("Recovery unavailable: account is not hedging.");
+      if(CloseOnStrongReversalIfNoRecovery)
+         CloseCampaign();
+      return false;
+   }
+
+   // Identify original position.
    TrendDirection orig=OriginalDirection();
-   if(orig==TREND_NONE||rev==orig)return false;
+   if(orig==TREND_NONE)
+   {
+      Log("Recovery rejected: original position not found.");
+      return false;
+   }
+
+   // Recovery must always be opposite to the original direction.
+   if(rev==orig)
+   {
+      Log("Recovery rejected: reversal direction equals original direction.");
+      return false;
+   }
+
+   // Recovery trigger uses REAL floating loss of the original campaign.
    double normal=NormalProfit();
-   if(normal>-RecoveryTriggerUSD)return false;
-   double baseLot=0;
-   for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)continue;baseLot+=PositionGetDouble(POSITION_VOLUME);}
-   double lot=NormalizeLot(MathMin(baseLot*RecoveryMultiplier,MaxRecoveryLot));
-   if(lot<=0){Log("Recovery rejected: invalid lot.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
-   if(CountPositions()>=MaximumExposurePositions){Log("Recovery rejected: exposure limit reached.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
-   if(!IsSpreadAcceptable()){Log("Recovery rejected: spread too high.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
-   if(OpenTrade(rev,"RECOVERY "+(rev==TREND_BUY?"BUY":"SELL"),lot,RecoverySL_ATR)){g_state=CAMPAIGN_RECOVERY;Log("Controlled recovery activated lot="+DoubleToString(lot,2)+" normal="+DoubleToString(normal,2));return true;}
-   if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();
+   if(normal>=0.0)
+   {
+      Log("Recovery skipped: original position is not losing. P/L="+DoubleToString(normal,2));
+      return false;
+   }
+   if(MathAbs(normal)<RecoveryTriggerUSD)
+   {
+      Log("Recovery waiting: loss="+DoubleToString(MathAbs(normal),2)+" trigger="+DoubleToString(RecoveryTriggerUSD,2));
+      return false;
+   }
+
+   // Exposure check.
+   int totalPositions=CountPositions();
+   if(MaximumExposurePositions>0 && totalPositions>=MaximumExposurePositions)
+   {
+      Log("Recovery rejected: maximum exposure reached. Positions="+(string)totalPositions+" max="+(string)MaximumExposurePositions);
+      if(CloseOnStrongReversalIfNoRecovery)
+         CloseCampaign();
+      return false;
+   }
+
+   // Recovery requires room for original + recovery.
+   if(MaximumExposurePositions>0 && MaximumExposurePositions<2)
+   {
+      Log("Recovery rejected: MaximumExposurePositions must be >= 2.");
+      if(CloseOnStrongReversalIfNoRecovery)
+         CloseCampaign();
+      return false;
+   }
+
+   // Spread check: do not close campaign just because spread is temporarily wide.
+   if(!IsSpreadAcceptable())
+   {
+      Log("Recovery temporarily blocked: spread too high.");
+      return false;
+   }
+
+   // Calculate original exposure.
+   double baseLot=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+      if((long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)
+         continue;
+      if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)
+         continue;
+      baseLot+=PositionGetDouble(POSITION_VOLUME);
+   }
+   if(baseLot<=0.0)
+   {
+      Log("Recovery rejected: original exposure is zero.");
+      return false;
+   }
+
+   // Calculate recovery lot.
+   double requestedLot=baseLot*RecoveryMultiplier;
+   requestedLot=MathMin(requestedLot,MaxRecoveryLot);
+   double lot=NormalizeLot(requestedLot);
+   if(lot<=0.0)
+   {
+      Log("Recovery rejected: normalized recovery lot <= 0.");
+      if(CloseOnStrongReversalIfNoRecovery)
+         CloseCampaign();
+      return false;
+   }
+
+   // Ensure ATR exists; OpenTrade will use it for the initial recovery SL.
+   double atr=0.0;
+   if(!GetATR(atr) || atr<=0.0)
+   {
+      Log("Recovery rejected: ATR unavailable.");
+      return false;
+   }
+
+   Log("Recovery setup: original="+(orig==TREND_BUY?"BUY":"SELL")+
+       " reversal="+(rev==TREND_BUY?"BUY":"SELL")+
+       " loss="+DoubleToString(normal,2)+
+       " baseLot="+DoubleToString(baseLot,2)+
+       " recoveryLot="+DoubleToString(lot,2)+
+       " ATR="+DoubleToString(atr,_Digits)+
+       " SL_ATR="+DoubleToString(RecoverySL_ATR,2));
+
+   // Execute recovery.
+   string comment="RECOVERY "+(rev==TREND_BUY?"BUY":"SELL");
+   if(OpenTrade(rev,comment,lot,RecoverySL_ATR))
+   {
+      g_state=CAMPAIGN_RECOVERY;
+      Log("RECOVERY ACTIVATED | direction="+(rev==TREND_BUY?"BUY":"SELL")+
+          " | lot="+DoubleToString(lot,2)+
+          " | originalLoss="+DoubleToString(normal,2)+
+          " | trigger="+DoubleToString(RecoveryTriggerUSD,2));
+      return true;
+   }
+
+   // Recovery order failed: keep original campaign alive so it can continue to be managed.
+   Log("Recovery order failed. retcode="+(string)trade.ResultRetcode()+" "+trade.ResultRetcodeDescription());
    return false;
 }
 void RecoveryEngine(){if(CountRecoveryPositions()<=0)return;double p=BasketProfit();g_state=CAMPAIGN_RECOVERY;if(RecoveryTargetUSD>0&&p>=RecoveryTargetUSD&&p>=RecoveryMinProfitUSD){Log("Recovery basket target reached.");CloseCampaign();return;}if(RecoveryMaxLossUSD>0&&p<=-RecoveryMaxLossUSD){Log("Recovery basket max loss reached.");CloseCampaign();return;}}
