@@ -1,6 +1,6 @@
 #property strict
-#property version   "1.25"
-#property description "Trend following EA with controlled recovery, hierarchical reversal exit and hard risk limits."
+#property version   "1.26"
+#property description "Trend following EA with controlled recovery, responsive reversal detection, hierarchical exit and hard risk limits."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -114,10 +114,61 @@ bool GetATR(double &v){return Buf(hATR,0,1,v);}
 TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0||a<MinimumADX)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
 bool ConfirmTrend(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a)||!Buf(hATR,0,sh,atr))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return false;bool ok=(dir==TREND_BUY)?f>s&&c>tr&&c>ht:f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&((dir==TREND_BUY)?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
 
-// Reversal confirmation is intentionally less restrictive than normal entry confirmation.
-// A strong reversal must be able to trigger even when the normal trend detector returns NONE
-// because ADX/HTF alignment has already been lost. This is the key recovery/reversal fix.
-bool ConfirmReversal(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,a,atr,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hADX,0,sh,a)||!Buf(hATR,0,sh,atr))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return false;bool ok=(dir==TREND_BUY)?f>s&&c>tr:f<s&&c<tr;if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&((dir==TREND_BUY)?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
+// Recovery reversal confirmation is intentionally independent from HTF alignment and ADX.
+// Normal entry confirmation remains strict. Recovery only needs evidence that price has
+// started moving against the losing campaign: consecutive opposite candles, price on the
+// correct side of the fast EMA, and fast-EMA slope in the reversal direction.
+bool ConfirmReversal(TrendDirection dir)
+{
+   int n=MathMax(1,ReversalConfirmationBars);
+   int directionalBars=0;
+
+   for(int sh=1;sh<=n;sh++)
+   {
+      double f,atr;
+      if(!Buf(hFastEMA,0,sh,f)||!Buf(hATR,0,sh,atr))
+         return false;
+
+      if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)
+         return false;
+
+      double c=iClose(_Symbol,TrendTimeframe,sh);
+      double o=iOpen(_Symbol,TrendTimeframe,sh);
+      if(c<=0||o<=0)
+         return false;
+
+      bool directional=(dir==TREND_BUY)?(c>o):(c<o);
+      bool fastSide=(dir==TREND_BUY)?(c>f):(c<f);
+
+      if(directional&&fastSide)
+         directionalBars++;
+   }
+
+   if(directionalBars<n)
+      return false;
+
+   // Require the fast EMA to be turning in the reversal direction.
+   double f,prevF;
+   if(!Buf(hFastEMA,0,1,f)||!Buf(hFastEMA,0,2,prevF))
+      return false;
+
+   bool slopeOK=(dir==TREND_BUY)?(f>=prevF):(f<=prevF);
+   if(!slopeOK)
+      return false;
+
+   if(UseRSIConfirmation)
+   {
+      double r;
+      if(!Buf(hRSI,0,1,r))
+         return false;
+      if(dir==TREND_BUY && r<RSIForBuy)
+         return false;
+      if(dir==TREND_SELL && r>RSIForSell)
+         return false;
+   }
+
+   return true;
+}
 
 int CountPositions(){int n=0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)==_Symbol&&(long)PositionGetInteger(POSITION_MAGIC)==MagicNumber)n++;}return n;}
 int CountRecoveryPositions(){int n=0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)n++;}return n;}
@@ -143,7 +194,6 @@ bool ModifySL(ulong ticket,double sl){if(!PositionSelectByTicket(ticket))return 
 
 bool OpenTrade(TrendDirection d,string comment,double lot,double slMult){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double p=d==TREND_BUY?t.ask:t.bid,sl=0;if(slMult>0){double dist=MathMax(atr*slMult,MinStopDistance());sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);}trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,comment):trade.Sell(lot,_Symbol,0,sl,0,comment);if(!sent||!TradeSucceeded()){Log("Trade failed retcode="+(string)trade.ResultRetcode()+" "+trade.ResultRetcodeDescription());return false;}return true;}
 void EntryEngine(TrendDirection d){if(g_state==CAMPAIGN_LOCKED||g_closePending||CountPositions()>0||d==TREND_NONE)return;if(CanOpen(d)){double lot=EntryLot();if(lot>0&&OpenTrade(d,"TREND "+(d==TREND_BUY?"BUY":"SELL"),lot,UseInitialSL?InitialSL_ATR:0)){g_lastEntryTime=TimeCurrent();g_state=CAMPAIGN_TREND;g_campaignPeakProfit=BasketProfit();g_campaignPeakActive=true;Log("Trend entry executed lot="+DoubleToString(lot,2));}}}
-
 void PositionProtection(ulong ticket){if(!PositionSelectByTicket(ticket))return;ENUM_POSITION_TYPE ty=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);double profit=PositionGetDouble(POSITION_PROFIT),open=PositionGetDouble(POSITION_PRICE_OPEN),vol=PositionGetDouble(POSITION_VOLUME),old=PositionGetDouble(POSITION_SL),sl=0;
    // One active protection mode only: trailing > lock > BE.
    if(UseATRTrailing&&profit>=ATRTrailingStartUSD){double atr;MqlTick t;if(GetATR(atr)&&SymbolInfoTick(_Symbol,t))sl=ty==POSITION_TYPE_BUY?t.bid-atr*ATRTrailingMultiplier:t.ask+atr*ATRTrailingMultiplier;}
@@ -158,45 +208,33 @@ bool StartRecovery(TrendDirection rev){
       Log("Recovery skipped: UseRecovery=false.");
       return false;
    }
-
    if(rev==TREND_NONE)
    {
       Log("Recovery rejected: invalid reversal direction.");
       return false;
    }
-
-   // Only one recovery position is allowed by design.
    if(CountRecoveryPositions()>=MaxRecoveryPositions)
    {
       Log("Recovery skipped: maximum recovery positions reached.");
       return false;
    }
-
-   // Account type requirement for recovery.
    if(RequireHedgingAccountForRecovery && !IsHedgingAccount())
    {
       Log("Recovery unavailable: account is not hedging.");
-      if(CloseOnStrongReversalIfNoRecovery)
-         CloseCampaign();
+      if(CloseOnStrongReversalIfNoRecovery) CloseCampaign();
       return false;
    }
-
-   // Identify original position.
    TrendDirection orig=OriginalDirection();
    if(orig==TREND_NONE)
    {
       Log("Recovery rejected: original position not found.");
       return false;
    }
-
-   // Recovery must always be opposite to the original direction.
    if(rev==orig)
    {
       Log("Recovery rejected: reversal direction equals original direction.");
       return false;
    }
-
-   // Recovery trigger uses REAL floating loss of the original campaign.
    double normal=NormalProfit();
    if(normal>=0.0)
    {
@@ -208,46 +246,32 @@ bool StartRecovery(TrendDirection rev){
       Log("Recovery waiting: loss="+DoubleToString(MathAbs(normal),2)+" trigger="+DoubleToString(RecoveryTriggerUSD,2));
       return false;
    }
-
-   // Exposure check.
    int totalPositions=CountPositions();
    if(MaximumExposurePositions>0 && totalPositions>=MaximumExposurePositions)
    {
       Log("Recovery rejected: maximum exposure reached. Positions="+(string)totalPositions+" max="+(string)MaximumExposurePositions);
-      if(CloseOnStrongReversalIfNoRecovery)
-         CloseCampaign();
+      if(CloseOnStrongReversalIfNoRecovery) CloseCampaign();
       return false;
    }
-
-   // Recovery requires room for original + recovery.
    if(MaximumExposurePositions>0 && MaximumExposurePositions<2)
    {
       Log("Recovery rejected: MaximumExposurePositions must be >= 2.");
-      if(CloseOnStrongReversalIfNoRecovery)
-         CloseCampaign();
+      if(CloseOnStrongReversalIfNoRecovery) CloseCampaign();
       return false;
    }
-
-   // Spread check: do not close campaign just because spread is temporarily wide.
    if(!IsSpreadAcceptable())
    {
-      Log("Recovery temporarily blocked: spread too high.");
+      Log("Recovery temporarily blocked: spread too high; waiting for next tick.");
       return false;
    }
-
-   // Calculate original exposure.
    double baseLot=0.0;
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
       ulong ticket=PositionGetTicket(i);
-      if(ticket==0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
-         continue;
-      if((long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)
-         continue;
-      if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)
-         continue;
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0) continue;
       baseLot+=PositionGetDouble(POSITION_VOLUME);
    }
    if(baseLot<=0.0)
@@ -255,55 +279,36 @@ bool StartRecovery(TrendDirection rev){
       Log("Recovery rejected: original exposure is zero.");
       return false;
    }
-
-   // Calculate recovery lot.
    double requestedLot=baseLot*RecoveryMultiplier;
    requestedLot=MathMin(requestedLot,MaxRecoveryLot);
    double lot=NormalizeLot(requestedLot);
    if(lot<=0.0)
    {
       Log("Recovery rejected: normalized recovery lot <= 0.");
-      if(CloseOnStrongReversalIfNoRecovery)
-         CloseCampaign();
+      if(CloseOnStrongReversalIfNoRecovery) CloseCampaign();
       return false;
    }
-
-   // Ensure ATR exists; OpenTrade will use it for the initial recovery SL.
    double atr=0.0;
    if(!GetATR(atr) || atr<=0.0)
    {
       Log("Recovery rejected: ATR unavailable.");
       return false;
    }
-
-   Log("Recovery setup: original="+(orig==TREND_BUY?"BUY":"SELL")+
-       " reversal="+(rev==TREND_BUY?"BUY":"SELL")+
-       " loss="+DoubleToString(normal,2)+
-       " baseLot="+DoubleToString(baseLot,2)+
-       " recoveryLot="+DoubleToString(lot,2)+
-       " ATR="+DoubleToString(atr,_Digits)+
-       " SL_ATR="+DoubleToString(RecoverySL_ATR,2));
-
-   // Execute recovery.
+   Log("Recovery setup: original="+(orig==TREND_BUY?"BUY":"SELL")+" reversal="+(rev==TREND_BUY?"BUY":"SELL")+" loss="+DoubleToString(normal,2)+" baseLot="+DoubleToString(baseLot,2)+" recoveryLot="+DoubleToString(lot,2)+" ATR="+DoubleToString(atr,_Digits)+" SL_ATR="+DoubleToString(RecoverySL_ATR,2));
    string comment="RECOVERY "+(rev==TREND_BUY?"BUY":"SELL");
    if(OpenTrade(rev,comment,lot,RecoverySL_ATR))
    {
       g_state=CAMPAIGN_RECOVERY;
-      Log("RECOVERY ACTIVATED | direction="+(rev==TREND_BUY?"BUY":"SELL")+
-          " | lot="+DoubleToString(lot,2)+
-          " | originalLoss="+DoubleToString(normal,2)+
-          " | trigger="+DoubleToString(RecoveryTriggerUSD,2));
+      Log("RECOVERY ACTIVATED | direction="+(rev==TREND_BUY?"BUY":"SELL")+" | lot="+DoubleToString(lot,2)+" | originalLoss="+DoubleToString(normal,2)+" | trigger="+DoubleToString(RecoveryTriggerUSD,2));
       return true;
    }
-
-   // Recovery order failed: keep original campaign alive so it can continue to be managed.
-   Log("Recovery order failed. retcode="+(string)trade.ResultRetcode()+" "+trade.ResultRetcodeDescription());
+   Log("Recovery order failed; original campaign remains protected by its existing SL.");
    return false;
 }
 void RecoveryEngine(){if(CountRecoveryPositions()<=0)return;double p=BasketProfit();g_state=CAMPAIGN_RECOVERY;if(RecoveryTargetUSD>0&&p>=RecoveryTargetUSD&&p>=RecoveryMinProfitUSD){Log("Recovery basket target reached.");CloseCampaign();return;}if(RecoveryMaxLossUSD>0&&p<=-RecoveryMaxLossUSD){Log("Recovery basket max loss reached.");CloseCampaign();return;}}
 
 // Strong reversal handling is independent from DetectTrend().
-// This prevents TREND_NONE (e.g. ADX/HTF filter loss) from blocking recovery or reversal exit.
+// Recovery uses ConfirmReversal(), which is deliberately faster than normal entry confirmation.
 void ReversalEngine(){
    TrendDirection orig=OriginalDirection();
    if(orig==TREND_NONE)return;
@@ -311,16 +316,12 @@ void ReversalEngine(){
    TrendDirection rev=(orig==TREND_BUY)?TREND_SELL:TREND_BUY;
    if(!ConfirmReversal(rev))return;
    Log("Strong reversal confirmed against original "+(orig==TREND_BUY?"BUY":"SELL"));
-   if(UseRecovery){
-      if(StartRecovery(rev))return;
-      if(CountPositions()>0&&CloseOnStrongReversalIfNoRecovery){Log("Recovery unavailable after strong reversal. Closing campaign.");CloseCampaign();}
-      return;
-   }
+   if(UseRecovery){if(StartRecovery(rev))return;if(CountPositions()>0&&CloseOnStrongReversalIfNoRecovery){Log("Recovery unavailable after strong reversal. Closing campaign.");CloseCampaign();}return;}
    if(CloseOnStrongReversalIfNoRecovery){Log("Strong reversal with recovery disabled. Closing campaign.");CloseCampaign();}
 }
 
 bool CampaignExit(){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;return false;}double p=BasketProfit();if(!g_campaignPeakActive){g_campaignPeakProfit=p;g_campaignPeakActive=true;}if(p>g_campaignPeakProfit)g_campaignPeakProfit=p;if(CampaignProfitTargetUSD>0&&p>=CampaignProfitTargetUSD){Log("Campaign profit target reached.");CloseCampaign();return true;}if(CampaignProfitTrailStartUSD>0&&CampaignProfitGivebackUSD>0&&g_campaignPeakProfit>=CampaignProfitTrailStartUSD&&(g_campaignPeakProfit-p)>=CampaignProfitGivebackUSD&&p>0){Log("Campaign profit giveback reached.");CloseCampaign();return true;}return false;}
-void ManagePositions(){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}if(CampaignExit())return;if(CountRecoveryPositions()>0){RecoveryEngine();if(CountPositions()>0)ProfitEngine();return;}ProfitEngine();g_state=BasketProfit()>0?CAMPAIGN_PROFIT:CAMPAIGN_TREND;ReversalEngine();}
+void ManagePositions(){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}if(CampaignExit())return;if(CountRecoveryPositions()>0){RecoveryEngine();if(CountPositions()>0)ProfitEngine();return;}ReversalEngine();if(CountPositions()<=0)return;ProfitEngine();g_state=BasketProfit()>0?CAMPAIGN_PROFIT:CAMPAIGN_TREND;}
 void TrendLog(TrendDirection d){if(!LogTrendChanges||d==g_lastTrend)return;Log("Trend="+(d==TREND_BUY?"BUY":d==TREND_SELL?"SELL":"NONE"));g_lastTrend=d;}
 
 int OnInit(){trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);hFastEMA=iMA(_Symbol,TrendTimeframe,FastEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hSlowEMA=iMA(_Symbol,TrendTimeframe,SlowEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hTrendEMA=iMA(_Symbol,TrendTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFEMA=iMA(_Symbol,HigherTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hADX=iADX(_Symbol,TrendTimeframe,ADXPeriod);hATR=iATR(_Symbol,TrendTimeframe,14);hRSI=iRSI(_Symbol,TrendTimeframe,RSIPeriod,PRICE_CLOSE);if(hFastEMA<0||hSlowEMA<0||hTrendEMA<0||hHTFEMA<0||hADX<0||hATR<0||hRSI<0){Log("Indicator initialization failed.");return INIT_FAILED;}double e=AccountInfoDouble(ACCOUNT_EQUITY);if(!GlobalVariableCheck(GVPeak())||GlobalVariableGet(GVPeak())<=0)GlobalVariableSet(GVPeak(),e);DailyState();int n=CountPositions();g_state=n>0?(CountRecoveryPositions()>0?CAMPAIGN_RECOVERY:CAMPAIGN_TREND):CAMPAIGN_IDLE;if(n>0){g_campaignPeakProfit=BasketProfit();g_campaignPeakActive=true;}Log("Initialized on "+_Symbol+" positions="+(string)n);return INIT_SUCCEEDED;}
