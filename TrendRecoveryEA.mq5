@@ -1,6 +1,6 @@
 #property strict
-#property version   "1.24"
-#property description "Trend following EA with controlled recovery, hierarchical exit and hard risk limits."
+#property version   "1.25"
+#property description "Trend following EA with controlled recovery, hierarchical reversal exit and hard risk limits."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -111,8 +111,13 @@ bool IsNewBar(){datetime t=iTime(_Symbol,TrendTimeframe,0);if(t<=0)return false;
 bool Buf(int h,int b,int sh,double &v){if(h<0)return false;double x[1];if(CopyBuffer(h,b,sh,1,x)!=1)return false;v=x[0];return true;}
 bool GetATR(double &v){return Buf(hATR,0,1,v);}
 
-TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r; if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0||a<MinimumADX)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
+TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0||a<MinimumADX)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
 bool ConfirmTrend(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a)||!Buf(hATR,0,sh,atr))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return false;bool ok=(dir==TREND_BUY)?f>s&&c>tr&&c>ht:f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&((dir==TREND_BUY)?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
+
+// Reversal confirmation is intentionally less restrictive than normal entry confirmation.
+// A strong reversal must be able to trigger even when the normal trend detector returns NONE
+// because ADX/HTF alignment has already been lost. This is the key recovery/reversal fix.
+bool ConfirmReversal(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,a,atr,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hADX,0,sh,a)||!Buf(hATR,0,sh,atr))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return false;bool ok=(dir==TREND_BUY)?f>s&&c>tr:f<s&&c<tr;if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&((dir==TREND_BUY)?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
 
 int CountPositions(){int n=0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)==_Symbol&&(long)PositionGetInteger(POSITION_MAGIC)==MagicNumber)n++;}return n;}
 int CountRecoveryPositions(){int n=0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)n++;}return n;}
@@ -147,14 +152,46 @@ void PositionProtection(ulong ticket){if(!PositionSelectByTicket(ticket))return;
    if(sl<=0)return;MqlTick t;if(!SymbolInfoTick(_Symbol,t))return;double md=MinStopDistance();sl=ty==POSITION_TYPE_BUY?MathMin(sl,t.bid-md):MathMax(sl,t.ask+md);sl=NormalizePrice(sl);if(ty==POSITION_TYPE_BUY&&old>0&&sl<=old+_Point)return;if(ty==POSITION_TYPE_SELL&&old>0&&sl>=old-_Point)return;ModifySL(ticket,sl);}
 void ProfitEngine(){for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;PositionProtection(t);}}
 
-bool StartRecovery(TrendDirection rev){if(!UseRecovery||CountRecoveryPositions()>=MaxRecoveryPositions)return false;if(!IsHedgingAccount()&&RequireHedgingAccountForRecovery){Log("Recovery skipped: non-hedging account.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}TrendDirection orig=OriginalDirection();if(orig==TREND_NONE||rev==orig||NormalProfit()>-RecoveryTriggerUSD)return false;double baseLot=0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)continue;baseLot+=PositionGetDouble(POSITION_VOLUME);}double lot=NormalizeLot(MathMin(baseLot*RecoveryMultiplier,MaxRecoveryLot));if(lot<=0)return false;if(OpenTrade(rev,"RECOVERY "+(rev==TREND_BUY?"BUY":"SELL"),lot,RecoverySL_ATR)){g_state=CAMPAIGN_RECOVERY;Log("Controlled recovery activated lot="+DoubleToString(lot,2));return true;}if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
-void RecoveryEngine(){if(CountRecoveryPositions()<=0)return;double p=BasketProfit();g_state=CAMPAIGN_RECOVERY;if(RecoveryTargetUSD>0&&p>=RecoveryTargetUSD&&p>=RecoveryMinProfitUSD){Log("Recovery basket target reached.");CloseCampaign();return;}if(RecoveryMaxLossUSD>0&&p<=-RecoveryMaxLossUSD){Log("Recovery basket max loss reached.");CloseCampaign();}}
-void ReversalEngine(TrendDirection trend){TrendDirection orig=OriginalDirection();if(orig==TREND_NONE||trend==TREND_NONE||trend==orig||!ConfirmTrend(trend))return;if(NormalProfit()>-RecoveryTriggerUSD)return;if(!StartRecovery(trend)&&!UseRecovery&&CloseOnStrongReversalIfNoRecovery)CloseCampaign();}
+bool StartRecovery(TrendDirection rev){
+   if(!UseRecovery||CountRecoveryPositions()>=MaxRecoveryPositions)return false;
+   if(!IsHedgingAccount()&&RequireHedgingAccountForRecovery){Log("Recovery skipped: non-hedging account.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
+   TrendDirection orig=OriginalDirection();
+   if(orig==TREND_NONE||rev==orig)return false;
+   double normal=NormalProfit();
+   if(normal>-RecoveryTriggerUSD)return false;
+   double baseLot=0;
+   for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)continue;baseLot+=PositionGetDouble(POSITION_VOLUME);}
+   double lot=NormalizeLot(MathMin(baseLot*RecoveryMultiplier,MaxRecoveryLot));
+   if(lot<=0){Log("Recovery rejected: invalid lot.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
+   if(CountPositions()>=MaximumExposurePositions){Log("Recovery rejected: exposure limit reached.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
+   if(!IsSpreadAcceptable()){Log("Recovery rejected: spread too high.");if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();return false;}
+   if(OpenTrade(rev,"RECOVERY "+(rev==TREND_BUY?"BUY":"SELL"),lot,RecoverySL_ATR)){g_state=CAMPAIGN_RECOVERY;Log("Controlled recovery activated lot="+DoubleToString(lot,2)+" normal="+DoubleToString(normal,2));return true;}
+   if(CloseOnStrongReversalIfNoRecovery)CloseCampaign();
+   return false;
+}
+void RecoveryEngine(){if(CountRecoveryPositions()<=0)return;double p=BasketProfit();g_state=CAMPAIGN_RECOVERY;if(RecoveryTargetUSD>0&&p>=RecoveryTargetUSD&&p>=RecoveryMinProfitUSD){Log("Recovery basket target reached.");CloseCampaign();return;}if(RecoveryMaxLossUSD>0&&p<=-RecoveryMaxLossUSD){Log("Recovery basket max loss reached.");CloseCampaign();return;}}
+
+// Strong reversal handling is independent from DetectTrend().
+// This prevents TREND_NONE (e.g. ADX/HTF filter loss) from blocking recovery or reversal exit.
+void ReversalEngine(){
+   TrendDirection orig=OriginalDirection();
+   if(orig==TREND_NONE)return;
+   if(NormalProfit()>-RecoveryTriggerUSD)return;
+   TrendDirection rev=(orig==TREND_BUY)?TREND_SELL:TREND_BUY;
+   if(!ConfirmReversal(rev))return;
+   Log("Strong reversal confirmed against original "+(orig==TREND_BUY?"BUY":"SELL"));
+   if(UseRecovery){
+      if(StartRecovery(rev))return;
+      if(CountPositions()>0&&CloseOnStrongReversalIfNoRecovery){Log("Recovery unavailable after strong reversal. Closing campaign.");CloseCampaign();}
+      return;
+   }
+   if(CloseOnStrongReversalIfNoRecovery){Log("Strong reversal with recovery disabled. Closing campaign.");CloseCampaign();}
+}
 
 bool CampaignExit(){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;return false;}double p=BasketProfit();if(!g_campaignPeakActive){g_campaignPeakProfit=p;g_campaignPeakActive=true;}if(p>g_campaignPeakProfit)g_campaignPeakProfit=p;if(CampaignProfitTargetUSD>0&&p>=CampaignProfitTargetUSD){Log("Campaign profit target reached.");CloseCampaign();return true;}if(CampaignProfitTrailStartUSD>0&&CampaignProfitGivebackUSD>0&&g_campaignPeakProfit>=CampaignProfitTrailStartUSD&&(g_campaignPeakProfit-p)>=CampaignProfitGivebackUSD&&p>0){Log("Campaign profit giveback reached.");CloseCampaign();return true;}return false;}
-void ManagePositions(TrendDirection trend){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}if(CampaignExit())return;if(CountRecoveryPositions()>0){RecoveryEngine();if(CountPositions()>0)ProfitEngine();return;}ProfitEngine();g_state=BasketProfit()>0?CAMPAIGN_PROFIT:CAMPAIGN_TREND;ReversalEngine(trend);}
+void ManagePositions(){if(CountPositions()<=0){g_campaignPeakProfit=0;g_campaignPeakActive=false;if(!g_closePending&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}if(CampaignExit())return;if(CountRecoveryPositions()>0){RecoveryEngine();if(CountPositions()>0)ProfitEngine();return;}ProfitEngine();g_state=BasketProfit()>0?CAMPAIGN_PROFIT:CAMPAIGN_TREND;ReversalEngine();}
 void TrendLog(TrendDirection d){if(!LogTrendChanges||d==g_lastTrend)return;Log("Trend="+(d==TREND_BUY?"BUY":d==TREND_SELL?"SELL":"NONE"));g_lastTrend=d;}
 
 int OnInit(){trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);hFastEMA=iMA(_Symbol,TrendTimeframe,FastEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hSlowEMA=iMA(_Symbol,TrendTimeframe,SlowEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hTrendEMA=iMA(_Symbol,TrendTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFEMA=iMA(_Symbol,HigherTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hADX=iADX(_Symbol,TrendTimeframe,ADXPeriod);hATR=iATR(_Symbol,TrendTimeframe,14);hRSI=iRSI(_Symbol,TrendTimeframe,RSIPeriod,PRICE_CLOSE);if(hFastEMA<0||hSlowEMA<0||hTrendEMA<0||hHTFEMA<0||hADX<0||hATR<0||hRSI<0){Log("Indicator initialization failed.");return INIT_FAILED;}double e=AccountInfoDouble(ACCOUNT_EQUITY);if(!GlobalVariableCheck(GVPeak())||GlobalVariableGet(GVPeak())<=0)GlobalVariableSet(GVPeak(),e);DailyState();int n=CountPositions();g_state=n>0?(CountRecoveryPositions()>0?CAMPAIGN_RECOVERY:CAMPAIGN_TREND):CAMPAIGN_IDLE;if(n>0){g_campaignPeakProfit=BasketProfit();g_campaignPeakActive=true;}Log("Initialized on "+_Symbol+" positions="+(string)n);return INIT_SUCCEEDED;}
 void OnDeinit(const int reason){if(hFastEMA>=0)IndicatorRelease(hFastEMA);if(hSlowEMA>=0)IndicatorRelease(hSlowEMA);if(hTrendEMA>=0)IndicatorRelease(hTrendEMA);if(hHTFEMA>=0)IndicatorRelease(hHTFEMA);if(hADX>=0)IndicatorRelease(hADX);if(hATR>=0)IndicatorRelease(hATR);if(hRSI>=0)IndicatorRelease(hRSI);}
-void OnTick(){DailyState();if(g_closePending){if(CountPositions()==0){g_closePending=false;if(g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;}else{ProfitEngine();return;}}TrendDirection trend=DetectTrend();TrendLog(trend);RiskEngine();if(g_state==CAMPAIGN_EXIT||g_closePending){if(CountPositions()==0&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}ManagePositions(trend);if(g_state==CAMPAIGN_LOCKED||g_closePending)return;if(UseNewBarForEntry&&!IsNewBar())return;EntryEngine(trend);}
+void OnTick(){DailyState();if(g_closePending){if(CountPositions()==0){g_closePending=false;if(g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;}else{ProfitEngine();return;}}TrendDirection trend=DetectTrend();TrendLog(trend);RiskEngine();if(g_state==CAMPAIGN_EXIT||g_closePending){if(CountPositions()==0&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}ManagePositions();if(g_state==CAMPAIGN_LOCKED||g_closePending)return;if(UseNewBarForEntry&&!IsNewBar())return;EntryEngine(trend);}
