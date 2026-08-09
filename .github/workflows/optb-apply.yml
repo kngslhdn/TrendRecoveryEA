@@ -1,0 +1,55 @@
+name: Apply TrendRecoveryEA OPT-B
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[OPT-B-AUTO]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply OPT-B changes
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('TrendRecoveryEA.mq5')
+          s = p.read_text()
+          replacements = [
+              ('#property version "1.28"', '#property version "1.29"'),
+              ('#property description "TrendRecoveryEA v1.28 - standalone compile-safe build with controlled recovery."', '#property description "TrendRecoveryEA v1.29 - Optimization B extreme-loss control with controlled recovery."'),
+              ('input double InitialSL_ATR=1.75;\n', 'input double InitialSL_ATR=1.75;\ninput double MaxInitialLossUSD=40.0;\n'),
+              ('input double ProfitLockStartUSD=12.0;', 'input double ProfitLockStartUSD=10.0;'),
+              ('input double ATRTrailingStartUSD=15.0;', 'input double ATRTrailingStartUSD=12.0;'),
+              ('input double CampaignProfitGivebackUSD=3.0;', 'input double CampaignProfitGivebackUSD=3.0;\ninput double MaxCampaignLossUSD=70.0;'),
+              ('input double RecoveryTriggerUSD=5.0;', 'input double RecoveryTriggerUSD=8.0;'),
+              ('input double RecoverySL_ATR=1.50;', 'input double RecoverySL_ATR=1.75;'),
+              ('input double RecoveryMaxLossPerTradeUSD=8.0;', 'input double RecoveryMaxLossPerTradeUSD=6.0;'),
+              ('input int RecoveryConfirmationBars=3;', 'input int RecoveryConfirmationBars=4;'),
+              ('//---------- RECOVERY EXIT v1.28 ----------', '//---------- RECOVERY EXIT v1.29 / OPT-B ----------'),
+              ('//---------- RISK SETTINGS ----------\ninput double MaxCampaignLossUSD=100.0;', '//---------- RISK SETTINGS ----------'),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(f'Missing expected pattern: {old}')
+              s = s.replace(old, new, 1)
+          old = 'bool OpenTrade(TrendDirection d,string comment,double lot,double slMult){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double p=d==TREND_BUY?t.ask:t.bid,sl=0;if(slMult>0){double dist=MathMax(atr*slMult,MinStopDistance());sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);}trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,comment):trade.Sell(lot,_Symbol,0,sl,0,comment);return sent&&TradeSucceeded();}'
+          new = 'bool OpenTrade(TrendDirection d,string comment,double lot,double slMult){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double p=d==TREND_BUY?t.ask:t.bid,sl=0;if(slMult>0){double atrDist=MathMax(atr*slMult,MinStopDistance());double riskDist=MoneyDistance(MaxInitialLossUSD,lot);double dist=atrDist;if(MaxInitialLossUSD>0&&riskDist>0)dist=MathMin(atrDist,MathMax(riskDist,MinStopDistance()));sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);}trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,comment):trade.Sell(lot,_Symbol,0,sl,0,comment);return sent&&TradeSucceeded();}'
+          if old not in s:
+              raise SystemExit('Missing OpenTrade baseline')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+      - name: Commit OPT-B and remove bootstrap workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/optb-apply.yml
+          git add TrendRecoveryEA.mq5 .github/workflows/optb-apply.yml
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat: TrendRecoveryEA v1.29 OPT-B extreme loss control [OPT-B-AUTO]'
+          git push
