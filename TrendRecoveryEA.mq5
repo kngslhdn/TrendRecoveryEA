@@ -1,6 +1,6 @@
 #property strict
-#property version "1.28"
-#property description "TrendRecoveryEA v1.28 - standalone compile-safe build with controlled recovery."
+#property version "1.29"
+#property description "TrendRecoveryEA v1.29 - Optimization B extreme-loss control with controlled recovery."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -35,44 +35,45 @@ input int SlippagePoints=30;
 //---------- PROFIT / POSITION EXIT ----------
 input bool UseInitialSL=true;
 input double InitialSL_ATR=1.75;
+input double MaxInitialLossUSD=40.0;
 input bool UseBreakEven=true;
 input double BreakEvenStartUSD=6.0;
 input double BreakEvenOffsetUSD=0.20;
 input bool UseProfitLock=true;
 input double ProfitLockStepUSD=3.0;
-input double ProfitLockStartUSD=12.0;
+input double ProfitLockStartUSD=10.0;
 input double ProfitLockOffsetUSD=5.0;
 input bool UseATRTrailing=true;
 input double ATRTrailingMultiplier=1.8;
-input double ATRTrailingStartUSD=15.0;
+input double ATRTrailingStartUSD=12.0;
 
 //---------- CAMPAIGN EXIT ----------
 input double CampaignProfitTargetUSD=0.0;
 input double CampaignProfitTrailStartUSD=10.0;
 input double CampaignProfitGivebackUSD=3.0;
+input double MaxCampaignLossUSD=70.0;
 
 //---------- RECOVERY SETTINGS ----------
 input bool UseRecovery=true;
-input double RecoveryTriggerUSD=5.0;
+input double RecoveryTriggerUSD=8.0;
 input double RecoveryMultiplier=1.0;
 input double MaxRecoveryLot=0.05;
 input int MaxRecoveryPositions=1;
 input double RecoveryTargetUSD=1.0;
 input double RecoveryMinProfitUSD=0.0;
 input double RecoveryMaxLossUSD=50.0;
-input double RecoverySL_ATR=1.50;
-input double RecoveryMaxLossPerTradeUSD=8.0;
-input int RecoveryConfirmationBars=3;
+input double RecoverySL_ATR=1.75;
+input double RecoveryMaxLossPerTradeUSD=6.0;
+input int RecoveryConfirmationBars=4;
 input bool CloseOnStrongReversalIfNoRecovery=true;
 
-//---------- RECOVERY EXIT v1.28 ----------
+//---------- RECOVERY EXIT v1.29 / OPT-B ----------
 input double RecoveryLockStartUSD=2.0;
 input double RecoveryLockProfitUSD=1.0;
 input double RecoveryTrailStartUSD=5.0;
 input double RecoveryTrailGivebackUSD=2.0;
 
 //---------- RISK SETTINGS ----------
-input double MaxCampaignLossUSD=100.0;
 input int MaxCampaignHours=24;
 input int MaximumExposurePositions=2;
 
@@ -150,7 +151,7 @@ double MoneyDistance(double money,double vol){if(money<=0||vol<=0)return 0;doubl
 bool ValidSL(ENUM_POSITION_TYPE ty,double sl){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double d=MinStopDistance();return ty==POSITION_TYPE_BUY?sl<=t.bid-d:sl>=t.ask+d;}
 bool ModifySL(ulong ticket,double sl){if(!PositionSelectByTicket(ticket))return false;ENUM_POSITION_TYPE ty=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);double old=PositionGetDouble(POSITION_SL),tp=PositionGetDouble(POSITION_TP);sl=NormalizePrice(sl);if(!ValidSL(ty,sl))return false;if(ty==POSITION_TYPE_BUY&&old>0&&sl<=old+_Point)return false;if(ty==POSITION_TYPE_SELL&&old>0&&sl>=old-_Point)return false;trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);return trade.PositionModify(ticket,sl,tp)&&TradeSucceeded();}
 
-bool OpenTrade(TrendDirection d,string comment,double lot,double slMult){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double p=d==TREND_BUY?t.ask:t.bid,sl=0;if(slMult>0){double dist=MathMax(atr*slMult,MinStopDistance());sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);}trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,comment):trade.Sell(lot,_Symbol,0,sl,0,comment);return sent&&TradeSucceeded();}
+bool OpenTrade(TrendDirection d,string comment,double lot,double slMult){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double p=d==TREND_BUY?t.ask:t.bid,sl=0;if(slMult>0){double atrDist=MathMax(atr*slMult,MinStopDistance());double riskDist=MoneyDistance(MaxInitialLossUSD,lot);double dist=atrDist;if(MaxInitialLossUSD>0&&riskDist>0)dist=MathMin(atrDist,MathMax(riskDist,MinStopDistance()));sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);}trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,comment):trade.Sell(lot,_Symbol,0,sl,0,comment);return sent&&TradeSucceeded();}
 
 bool OpenRecoveryTrade(TrendDirection d,double lot){MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double atr;if(!GetATR(atr))return false;double atrDist=MathMax(atr*RecoverySL_ATR,MinStopDistance());double riskDist=MoneyDistance(RecoveryMaxLossPerTradeUSD,lot);double dist=atrDist;if(RecoveryMaxLossPerTradeUSD>0&&riskDist>0)dist=MathMin(atrDist,MathMax(riskDist,MinStopDistance()));double p=d==TREND_BUY?t.ask:t.bid;double sl=NormalizePrice(d==TREND_BUY?p-dist:p+dist);trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=d==TREND_BUY?trade.Buy(lot,_Symbol,0,sl,0,"RECOVERY BUY"):trade.Sell(lot,_Symbol,0,sl,0,"RECOVERY SELL");return sent&&TradeSucceeded();}
 
