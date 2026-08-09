@@ -1,7 +1,15 @@
 #property strict
 #property version   "1.28"
 #property description "Trend following EA with controlled recovery, responsive reversal detection, hierarchical exit and hard risk limits. Recovery Engine v1.28 integrated."
+
+// Keep the proven v1.27 core intact and replace only the recovery/position/tick path.
+#define RecoveryEngine RecoveryEngine_v127
+#define ManagePositions ManagePositions_v127
+#define OnTick OnTick_v127
 #include "TrendRecoveryEA_v1.27.mq5"
+#undef RecoveryEngine
+#undef ManagePositions
+#undef OnTick
 
 //---------- RECOVERY ENGINE v1.28 SETTINGS ----------
 input double RecoveryLockStartUSD=2.0;
