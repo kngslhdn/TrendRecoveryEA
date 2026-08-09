@@ -1,1 +1,0 @@
-OPT-B bootstrap trigger
