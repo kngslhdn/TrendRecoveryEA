@@ -1,0 +1,66 @@
+name: Apply Weekend Protection
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-ea:
+    if: ${{ !contains(github.event.head_commit.message, '[weekend-protection]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch TrendRecoveryEA v1.37
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('TrendRecoveryEA.mq5')
+          s = p.read_text(encoding='utf-8')
+
+          if 'UseWeekendProtection' in s:
+              raise SystemExit('Weekend protection already present')
+
+          s = s.replace('#property version "1.36"', '#property version "1.37"', 1)
+          s = s.replace(
+              '#property description "TrendRecoveryEA v1.36 - state-isolated backtest/live protection, hard USD protection, cycle profit protection, strong BUY regime exit and improved payoff protection."',
+              '#property description "TrendRecoveryEA v1.37 - state-isolated protection, hard USD loss protection, regime/recovery exits, improved payoff protection and weekend exposure protection."',
+              1)
+
+          marker = '//---------- HARD USD LOSS PROTECTION v1.33 ----------\ninput bool UseHardNormalUSDLoss=true;'
+          addition = marker + '''\n\n//---------- WEEKEND PROTECTION v1.37 ----------\ninput bool UseWeekendProtection=true;\ninput int FridayCloseHour=22;\ninput int FridayCloseMinute=0;\ninput bool BlockSundayTrading=true;'''
+          if marker not in s:
+              raise SystemExit('Hard USD protection marker not found')
+          s = s.replace(marker, addition, 1)
+
+          risk_marker = 'bool DailyLocked(){DailyState();double s=GlobalVariableGet(GVDaily());if(s<=0)return false;double loss=s-AccountInfoDouble(ACCOUNT_EQUITY);return (MaxDailyLossUSD>0&&loss>=MaxDailyLossUSD)||(MaxDailyLossPercent>0&&loss/s*100.0>=MaxDailyLossPercent);}\n'
+          weekend = '''bool DailyLocked(){DailyState();double s=GlobalVariableGet(GVDaily());if(s<=0)return false;double loss=s-AccountInfoDouble(ACCOUNT_EQUITY);return (MaxDailyLossUSD>0&&loss>=MaxDailyLossUSD)||(MaxDailyLossPercent>0&&loss/s*100.0>=MaxDailyLossPercent);}\n\n//---------- FUNCTION: WEEKEND PROTECTION v1.37 ----------\nbool WeekendProtection()\n{\n   if(!UseWeekendProtection) return false;\n\n   MqlDateTime d;\n   TimeToStruct(TimeTradeServer(),d);\n\n   // Saturday: always block and close remaining EA exposure.\n   if(d.day_of_week==6)\n   {\n      if(CountPositions()>0) CloseCampaign();\n      return true;\n   }\n\n   // Sunday: block until the normal trading session resumes.\n   if(d.day_of_week==0 && BlockSundayTrading)\n   {\n      if(CountPositions()>0) CloseCampaign();\n      return true;\n   }\n\n   // Friday: close all EA exposure from the configured cutoff.\n   if(d.day_of_week==5)\n   {\n      int nowMinutes=d.hour*60+d.min;\n      int closeMinutes=FridayCloseHour*60+FridayCloseMinute;\n      if(nowMinutes>=closeMinutes)\n      {\n         if(CountPositions()>0) CloseCampaign();\n         return true;\n      }\n   }\n\n   return false;\n}\n'''
+          if risk_marker not in s:
+              raise SystemExit('DailyLocked marker not found')
+          s = s.replace(risk_marker, weekend, 1)
+
+          start = s.find('void OnTick()')
+          if start < 0:
+              raise SystemExit('OnTick not found')
+          end = s.find('\n}', start)
+          if end < 0:
+              raise SystemExit('OnTick end not found')
+          end += 2
+          new_on_tick = '''void OnTick()\n{\n   DailyState();\n\n   // WEEKEND PROTECTION MUST RUN BEFORE RISK / POSITION / ENTRY ENGINES.\n   if(WeekendProtection())\n   {\n      if(CountPositions()==0)\n      {\n         g_closePending=false;\n         if(g_state!=CAMPAIGN_LOCKED) g_state=CAMPAIGN_IDLE;\n      }\n      return;\n   }\n\n   if(g_closePending)\n   {\n      if(CountPositions()==0)\n      {\n         g_closePending=false;\n         if(g_state!=CAMPAIGN_LOCKED) g_state=CAMPAIGN_IDLE;\n      }\n      else\n      {\n         ProfitEngine();\n         return;\n      }\n   }\n\n   TrendDirection trend=DetectTrend();\n   TrendLog(trend);\n   RiskEngine();\n\n   if(g_state==CAMPAIGN_EXIT||g_closePending)\n   {\n      if(CountPositions()==0&&g_state!=CAMPAIGN_LOCKED) g_state=CAMPAIGN_IDLE;\n      return;\n   }\n\n   ManagePositions();\n\n   if(g_state==CAMPAIGN_LOCKED||g_closePending) return;\n   if(UseNewBarForEntry&&!IsNewBar()) return;\n   EntryEngine(trend);\n}'''
+          s = s[:start] + new_on_tick + s[end:]
+
+          p.write_text(s, encoding='utf-8')
+          print('Patched', p, 'bytes=', p.stat().st_size)
+
+      - name: Commit and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TrendRecoveryEA.mq5
+          git commit -m 'fix: add weekend exposure protection [weekend-protection]'
+          git push
