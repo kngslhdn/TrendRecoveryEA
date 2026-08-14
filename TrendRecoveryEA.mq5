@@ -1,6 +1,6 @@
 #property strict
-#property version "1.36"
-#property description "TrendRecoveryEA v1.36 - state-isolated backtest/live protection, hard USD protection, cycle profit protection, strong BUY regime exit and improved payoff protection."
+#property version "1.37"
+#property description "TrendRecoveryEA v1.37 - weekend exposure protection added to prevent avoidable weekend gap losses."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -114,6 +114,12 @@ input double EquityProfitGivebackUSD=50.0;
 //---------- HARD USD LOSS PROTECTION v1.33 ----------
 input bool UseHardNormalUSDLoss=true;
 
+//---------- WEEKEND PROTECTION v1.37 ----------
+input bool UseWeekendProtection=true;
+input int FridayCloseHour=22;
+input int FridayCloseMinute=0;
+input bool BlockSundayTrading=true;
+
 int hFastEMA=-1,hSlowEMA=-1,hTrendEMA=-1,hHTFEMA=-1,hHTFFastEMA=-1,hHTFSlowEMA=-1,hADX=-1,hATR=-1,hRSI=-1;
 datetime g_lastEntryTime=0,g_lastBarTime=0;
 TrendDirection g_lastTrend=TREND_NONE;
@@ -126,14 +132,14 @@ double g_recoveryPeakProfit=0.0;
 bool g_recoveryPeakActive=false;
 bool g_profitProtectionClosePending=false;
 
-//---------- STATE ISOLATION v1.36 ----------
+//---------- STATE ISOLATION v1.37 ----------
 string StateScope(){if((bool)MQLInfoInteger(MQL_TESTER))return "TESTER_"+(string)MagicNumber+"_"+_Symbol;return "LIVE_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+"_"+(string)MagicNumber+"_"+_Symbol;}
-string GVPeak(){return "TRENDREC_V136_PEAK_"+StateScope();}
-string GVDaily(){return "TRENDREC_V136_DAYEQ_"+StateScope();}
-string GVDay(){return "TRENDREC_V136_DAY_"+StateScope();}
-string GVStart(){return "TRENDREC_V136_START_"+StateScope();}
-string GVProfitPeak(){return "TRENDREC_V136_PROFITPEAK_"+StateScope();}
-string GVProfitStart(){return "TRENDREC_V136_PROFITSTART_"+StateScope();}
+string GVPeak(){return "TRENDREC_V137_PEAK_"+StateScope();}
+string GVDaily(){return "TRENDREC_V137_DAYEQ_"+StateScope();}
+string GVDay(){return "TRENDREC_V137_DAY_"+StateScope();}
+string GVStart(){return "TRENDREC_V137_START_"+StateScope();}
+string GVProfitPeak(){return "TRENDREC_V137_PROFITPEAK_"+StateScope();}
+string GVProfitStart(){return "TRENDREC_V137_PROFITSTART_"+StateScope();}
 void Log(string s){if(EnableLogging)Print("[TrendRecoveryEA] ",s);}
 int VolumeDigits(){double x=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);int d=0;while(d<8&&MathAbs(x-MathRound(x))>1e-10){x*=10.0;d++;}return d;}
 double NormalizeLot(double lot){double mn=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),mx=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),st=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);if(mn<=0||mx<=0||st<=0)return 0;lot=MathMin(lot,MathMin(mx,MaxLot));lot=MathMax(lot,mn);lot=MathFloor(lot/st+1e-9)*st;if(lot<mn)lot=mn;return NormalizeDouble(lot,VolumeDigits());}
@@ -163,6 +169,29 @@ bool EquityLocked(){if(MaxEquityDrawdownPercent<=0)return false;double e=Account
 void DailyState(){MqlDateTime d;TimeToStruct(TimeTradeServer(),d);long day=(long)d.year*10000+(long)d.mon*100+d.day;if(GlobalVariableGet(GVDay())!=(double)day){GlobalVariableSet(GVDay(),(double)day);GlobalVariableSet(GVDaily(),AccountInfoDouble(ACCOUNT_EQUITY));}}
 bool DailyLocked(){DailyState();double s=GlobalVariableGet(GVDaily());if(s<=0)return false;double loss=s-AccountInfoDouble(ACCOUNT_EQUITY);return (MaxDailyLossUSD>0&&loss>=MaxDailyLossUSD)||(MaxDailyLossPercent>0&&loss/s*100.0>=MaxDailyLossPercent);}
 bool CloseCampaign(){bool ok=true;bool locked=(g_state==CAMPAIGN_LOCKED);g_state=CAMPAIGN_EXIT;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);bool sent=trade.PositionClose(t);if(!sent||!TradeSucceeded()){ok=false;Log("Close failed ticket="+(string)t+" retcode="+(string)trade.ResultRetcode()+" "+trade.ResultRetcodeDescription());}}g_closePending=CountPositions()>0;if(!g_closePending&&ok){g_state=locked?CAMPAIGN_LOCKED:CAMPAIGN_IDLE;g_campaignPeakProfit=0;g_campaignPeakActive=false;g_recoveryAttempts=0;g_recoveryPeakProfit=0;g_recoveryPeakActive=false;}return ok;}
+
+bool WeekendProtection(){
+   if(!UseWeekendProtection)return false;
+   MqlDateTime d;
+   TimeToStruct(TimeTradeServer(),d);
+   if(d.day_of_week==6){
+      if(CountPositions()>0)CloseCampaign();
+      return true;
+   }
+   if(d.day_of_week==0&&BlockSundayTrading){
+      if(CountPositions()>0)CloseCampaign();
+      return true;
+   }
+   if(d.day_of_week==5){
+      int nowMinutes=d.hour*60+d.min;
+      int closeMinutes=FridayCloseHour*60+FridayCloseMinute;
+      if(nowMinutes>=closeMinutes){
+         if(CountPositions()>0)CloseCampaign();
+         return true;
+      }
+   }
+   return false;
+}
 
 void ResetEquityProfitProtection(){double e=AccountInfoDouble(ACCOUNT_EQUITY);GlobalVariableSet(GVProfitPeak(),e);GlobalVariableSet(GVProfitStart(),e);}
 bool EquityProfitProtection(){if(!UseEquityProfitProtection||EquityProfitLockStartUSD<=0||EquityProfitGivebackUSD<=0)return false;double e=AccountInfoDouble(ACCOUNT_EQUITY),peak=GlobalVariableGet(GVProfitPeak()),start=GlobalVariableGet(GVProfitStart());if(peak<=0||start<=0){ResetEquityProfitProtection();return false;}if(e>peak){peak=e;GlobalVariableSet(GVProfitPeak(),peak);return false;}if(peak-start<EquityProfitLockStartUSD)return false;return (peak-e)>=EquityProfitGivebackUSD;}
@@ -208,4 +237,33 @@ void TrendLog(TrendDirection d){if(!LogTrendChanges||d==g_lastTrend)return;Log("
 
 int OnInit(){trade.SetExpertMagicNumber(MagicNumber);trade.SetDeviationInPoints(SlippagePoints);trade.SetTypeFillingBySymbol(_Symbol);hFastEMA=iMA(_Symbol,TrendTimeframe,FastEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hSlowEMA=iMA(_Symbol,TrendTimeframe,SlowEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hTrendEMA=iMA(_Symbol,TrendTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFEMA=iMA(_Symbol,HigherTimeframe,TrendEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFFastEMA=iMA(_Symbol,HigherTimeframe,FastEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hHTFSlowEMA=iMA(_Symbol,HigherTimeframe,SlowEMAPeriod,0,MODE_EMA,PRICE_CLOSE);hADX=iADX(_Symbol,TrendTimeframe,ADXPeriod);hATR=iATR(_Symbol,TrendTimeframe,14);hRSI=iRSI(_Symbol,TrendTimeframe,RSIPeriod,PRICE_CLOSE);if(hFastEMA<0||hSlowEMA<0||hTrendEMA<0||hHTFEMA<0||hHTFFastEMA<0||hHTFSlowEMA<0||hADX<0||hATR<0||hRSI<0)return INIT_FAILED;double e=AccountInfoDouble(ACCOUNT_EQUITY);bool tester=(bool)MQLInfoInteger(MQL_TESTER);if(tester){GlobalVariableSet(GVPeak(),e);GlobalVariableSet(GVStart(),e);GlobalVariableSet(GVDaily(),e);MqlDateTime td;TimeToStruct(TimeTradeServer(),td);long day=(long)td.year*10000+(long)td.mon*100+td.day;GlobalVariableSet(GVDay(),(double)day);ResetEquityProfitProtection();}else{if(!GlobalVariableCheck(GVPeak())||GlobalVariableGet(GVPeak())<=0)GlobalVariableSet(GVPeak(),e);if(!GlobalVariableCheck(GVStart())||GlobalVariableGet(GVStart())<=0)GlobalVariableSet(GVStart(),e);if(!GlobalVariableCheck(GVProfitPeak())||GlobalVariableGet(GVProfitPeak())<=0||!GlobalVariableCheck(GVProfitStart())||GlobalVariableGet(GVProfitStart())<=0)ResetEquityProfitProtection();DailyState();}int n=CountPositions();g_state=n>0?(CountRecoveryPositions()>0?CAMPAIGN_RECOVERY:CAMPAIGN_TREND):CAMPAIGN_IDLE;if(n>0){g_campaignPeakProfit=BasketProfit();g_campaignPeakActive=true;}return INIT_SUCCEEDED;}
 void OnDeinit(const int reason){if(hFastEMA>=0)IndicatorRelease(hFastEMA);if(hSlowEMA>=0)IndicatorRelease(hSlowEMA);if(hTrendEMA>=0)IndicatorRelease(hTrendEMA);if(hHTFEMA>=0)IndicatorRelease(hHTFEMA);if(hHTFFastEMA>=0)IndicatorRelease(hHTFFastEMA);if(hHTFSlowEMA>=0)IndicatorRelease(hHTFSlowEMA);if(hADX>=0)IndicatorRelease(hADX);if(hATR>=0)IndicatorRelease(hATR);if(hRSI>=0)IndicatorRelease(hRSI);}
-void OnTick(){DailyState();if(g_closePending){if(CountPositions()==0){g_closePending=false;if(g_profitProtectionClosePending){ResetEquityProfitProtection();g_profitProtectionClosePending=false;g_state=CAMPAIGN_IDLE;}else if(g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;}else{HardNormalLossProtection();ProfitEngine();return;}}RiskEngine();if(g_state==CAMPAIGN_EXIT||g_closePending){if(CountPositions()==0&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;return;}TrendDirection trend=DetectTrend();TrendLog(trend);ManagePositions();if(g_state==CAMPAIGN_LOCKED||g_closePending)return;if(UseNewBarForEntry&&!IsNewBar())return;EntryEngine(trend);}
+
+//---------- FUNCTION: ON TICK v1.37 ----------
+void OnTick(){
+   DailyState();
+   if(WeekendProtection()){
+      if(CountPositions()==0){
+         g_closePending=false;
+         if(g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;
+      }
+      return;
+   }
+   if(g_closePending){
+      if(CountPositions()==0){
+         g_closePending=false;
+         if(g_profitProtectionClosePending){ResetEquityProfitProtection();g_profitProtectionClosePending=false;g_state=CAMPAIGN_IDLE;}
+         else if(g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;
+      }else{HardNormalLossProtection();ProfitEngine();return;}
+   }
+   RiskEngine();
+   if(g_state==CAMPAIGN_EXIT||g_closePending){
+      if(CountPositions()==0&&g_state!=CAMPAIGN_LOCKED)g_state=CAMPAIGN_IDLE;
+      return;
+   }
+   TrendDirection trend=DetectTrend();
+   TrendLog(trend);
+   ManagePositions();
+   if(g_state==CAMPAIGN_LOCKED||g_closePending)return;
+   if(UseNewBarForEntry&&!IsNewBar())return;
+   EntryEngine(trend);
+}
