@@ -3,10 +3,7 @@
 #property description "TrendRecoveryEA v1.40 - recovery-first management, anti-churn re-entry, safer regime exits."
 #include <Trade/Trade.mqh>
 CTrade trade;
-
 enum TrendDirection { TREND_NONE=0, TREND_BUY=1, TREND_SELL=-1 };
-
-//---------- TREND SETTINGS ----------
 input ENUM_TIMEFRAMES TrendTimeframe=PERIOD_M15;
 input ENUM_TIMEFRAMES HigherTimeframe=PERIOD_H1;
 input int FastEMAPeriod=20;
@@ -26,19 +23,15 @@ input bool CloseOnRegimeDamage=true;
 input bool UseStrongBuyRegimeExit=true;
 input int BuyRegimeExitConfirmationBars=1;
 input double BuyRegimeExitADX=20.0;
-
-//---------- ENTRY SETTINGS ----------
 input double InitialLot=0.01;
 input double MaxLot=0.10;
 input int EntryCooldownSeconds=900;
 input int MinimumHoldSeconds=300;
-input MaximumPositions=1;
+input int MaximumPositions=1;
 input double MinimumEntryDistance=0.0;
 input double MaximumSpread=300.0;
 input long MagicNumber=26080901;
 input int SlippagePoints=30;
-
-//---------- POSITION RISK ----------
 input bool UseInitialSL=true;
 input double InitialSL_ATR=1.75;
 input double MaxInitialLossUSD=12.0;
@@ -53,15 +46,11 @@ input double ProfitLockOffsetUSD=3.0;
 input bool UseATRTrailing=true;
 input double ATRTrailingMultiplier=1.8;
 input double ATRTrailingStartUSD=15.0;
-
-//---------- CAMPAIGN ----------
 input double CampaignProfitTargetUSD=0.0;
 input double CampaignProfitTrailStartUSD=10.0;
 input double CampaignProfitGivebackUSD=3.0;
 input double MaxCampaignLossUSD=30.0;
 input int MaxCampaignHours=24;
-
-//---------- RECOVERY ----------
 input bool UseRecovery=true;
 input double RecoveryTriggerUSD=8.0;
 input double RecoveryMultiplier=1.0;
@@ -80,16 +69,12 @@ input double RecoveryLockStartUSD=2.0;
 input double RecoveryLockProfitUSD=1.0;
 input double RecoveryTrailStartUSD=5.0;
 input double RecoveryTrailGivebackUSD=2.0;
-
-//---------- RISK ----------
 input int MaximumExposurePositions=2;
 input double MaxEquityDrawdownPercent=15.0;
 input bool ClosePositionsOnEquityProtection=true;
 input double MaxDailyLossUSD=20.0;
 input double MaxDailyLossPercent=2.0;
 input bool ClosePositionsOnDailyProtection=true;
-
-//---------- SESSION ----------
 input bool UseTradingSession=true;
 input int TradingStartHour=13;
 input int TradingEndHour=23;
@@ -100,16 +85,10 @@ input bool RequireHedgingAccountForRecovery=true;
 input bool UseNewBarForEntry=true;
 input bool EnableLogging=true;
 input bool LogTrendChanges=true;
-
-//---------- EQUITY PROFIT PROTECTION ----------
 input bool UseEquityProfitProtection=true;
 input double EquityProfitLockStartUSD=25.0;
 input double EquityProfitGivebackUSD=50.0;
-
-//---------- HARD LOSS ----------
 input bool UseHardNormalUSDLoss=true;
-
-//---------- WEEKEND ----------
 input bool UseWeekendProtection=true;
 input int FridayCloseHour=22;
 input int FridayCloseMinute=0;
@@ -136,7 +115,6 @@ bool IsTradingSession(){if(!UseTradingSession)return true;MqlDateTime d;TimeToSt
 bool IsNewBar(){datetime t=iTime(_Symbol,TrendTimeframe,0);if(t<=0)return false;if(t!=g_lastBarTime){g_lastBarTime=t;return true;}return false;}
 bool Buf(int h,int b,int sh,double &v){if(h<0)return false;double x[1];if(CopyBuffer(h,b,sh,1,x)!=1)return false;v=x[0];return true;}
 bool GetATR(double &v){return Buf(hATR,0,1,v);}
-
 void UpdateDailyState(){long day=DayKey();if(g_dailyStartEquity<=0.0){g_dailyStartEquity=AccountInfoDouble(ACCOUNT_EQUITY);g_dailyLockDay=0;}if(g_dailyLockDay!=0&&g_dailyLockDay!=day){g_dailyLockDay=0;g_dailyStartEquity=AccountInfoDouble(ACCOUNT_EQUITY);Log("New trading day: DAILY LOCK RESET.");}}
 bool WeekendBlocked(){if(!UseWeekendProtection)return false;MqlDateTime d;TimeToStruct(Now(),d);if(d.day_of_week==6)return true;if(d.day_of_week==0&&BlockSundayTrading)return true;if(d.day_of_week==5)return d.hour*60+d.min>=FridayCloseHour*60+FridayCloseMinute;return false;}
 TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0||a<MinimumADX)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
