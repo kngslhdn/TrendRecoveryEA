@@ -1,6 +1,6 @@
 #property strict
-#property version "1.42"
-#property description "TrendRecoveryEA v1.42 - asymmetric BUY/SELL trend quality filter."
+#property version "1.43"
+#property description "TrendRecoveryEA v1.43 - hierarchical exit engine, thesis invalidation and hybrid profit trailing."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -29,6 +29,25 @@ input bool UseStrongBuyRegimeExit=true;
 input int BuyRegimeExitConfirmationBars=1;
 input double BuyRegimeExitADX=20.0;
 
+//---------- EXIT ENGINE V1.43
+input bool UseHierarchicalExit=true;
+input int ExitRegimeDamageScore=6;
+input int ExitRegimeWarningScore=3;
+input bool ExitOnThesisInvalidation=true;
+input int ExitThesisConfirmationBars=2;
+input double ATRTrailingHardStartUSD=20.0;
+input double CampaignGivebackLevel2USD=5.0;
+input double CampaignGivebackLevel3USD=7.0;
+input double CampaignGivebackLevel4USD=10.0;
+input double CampaignPeakLevel2USD=15.0;
+input double CampaignPeakLevel3USD=25.0;
+input double CampaignPeakLevel4USD=40.0;
+input int CampaignProgressGraceHours=4;
+input int CampaignStaleHours=8;
+input double CampaignStaleMinProfitUSD=0.0;
+input bool UseRecoveryBasketBreakevenExit=true;
+
+
 input double InitialLot=0.01;
 input double MaxLot=0.10;
 input int EntryCooldownSeconds=900;
@@ -52,7 +71,7 @@ input double ProfitLockStartUSD=8.0;
 input double ProfitLockOffsetUSD=3.0;
 input bool UseATRTrailing=true;
 input double ATRTrailingMultiplier=1.8;
-input double ATRTrailingStartUSD=15.0;
+input double ATRTrailingStartUSD=20.0;
 
 input double CampaignProfitTargetUSD=0.0;
 input double CampaignProfitTrailStartUSD=10.0;
@@ -159,7 +178,48 @@ double EntryLot(){double lot=UseEquityScaling&&BaseEquity>0?BaseLot*AccountInfoD
 bool HasDistance(TrendDirection d){if(MinimumEntryDistance<=0)return true;MqlTick t;if(!SymbolInfoTick(_Symbol,t))return false;double p=d==TREND_BUY?t.ask:t.bid;for(int i=PositionsTotal()-1;i>=0;i--){ulong x=PositionGetTicket(i);if(x==0||!PositionSelectByTicket(x))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(MathAbs(p-PositionGetDouble(POSITION_PRICE_OPEN))<MinimumEntryDistance)return false;}return true;}
 bool CanOpen(TrendDirection d){if(d==TREND_NONE||g_equityLocked||g_profitProtectionLocked||g_dailyLockDay==DayKey()||g_closePending)return false;if(WeekendBlocked()||!IsTradingSession()||!IsSpreadAcceptable())return false;if(CountPositions()>0)return false;if(MaximumPositions>0&&CountPositions()>=MaximumPositions)return false;if(MaximumExposurePositions>0&&CountPositions()>=MaximumExposurePositions)return false;if(g_lastEntryTime>0&&Now()-g_lastEntryTime<EntryCooldownSeconds)return false;if(g_lastExitTime>0&&Now()-g_lastExitTime<EntryCooldownSeconds)return false;return HasDistance(d)&&ConfirmTrend(d);}
 
-void PositionProtection(ulong ticket){if(!PositionSelectByTicket(ticket))return;ENUM_POSITION_TYPE ty=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);double profit=PositionGetDouble(POSITION_PROFIT),open=PositionGetDouble(POSITION_PRICE_OPEN),vol=PositionGetDouble(POSITION_VOLUME),sl=0;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0){if(RecoveryTrailStartUSD>0&&RecoveryTrailGivebackUSD>0&&profit>=RecoveryTrailStartUSD){double dist=MoneyDistance(RecoveryTrailGivebackUSD,vol);MqlTick t;if(dist>0&&SymbolInfoTick(_Symbol,t))sl=ty==POSITION_TYPE_BUY?t.bid-dist:t.ask+dist;}else if(RecoveryLockStartUSD>0&&profit>=RecoveryLockStartUSD){double dist=MoneyDistance(RecoveryLockProfitUSD,vol);if(dist>0)sl=ty==POSITION_TYPE_BUY?open+dist:open-dist;}}else if(UseATRTrailing&&profit>=ATRTrailingStartUSD){double atr;MqlTick t;if(GetATR(atr)&&SymbolInfoTick(_Symbol,t))sl=ty==POSITION_TYPE_BUY?t.bid-atr*ATRTrailingMultiplier:t.ask+atr*ATRTrailingMultiplier;}else if(UseProfitLock&&profit>=ProfitLockStartUSD&&ProfitLockStepUSD>0){int n=(int)MathFloor((profit-ProfitLockStartUSD)/ProfitLockStepUSD)+1;double locked=ProfitLockOffsetUSD+(n-1)*ProfitLockStepUSD,dist=MoneyDistance(locked,vol);if(dist>0)sl=ty==POSITION_TYPE_BUY?open+dist:open-dist;}else if(UseBreakEven&&profit>=BreakEvenStartUSD){double dist=MoneyDistance(BreakEvenOffsetUSD,vol);if(dist>0)sl=ty==POSITION_TYPE_BUY?open+dist:open-dist;}if(sl>0)ModifySL(ticket,sl);}
+double ProtectiveSL(ENUM_POSITION_TYPE ty,double a,double b){if(a<=0)return b;if(b<=0)return a;return ty==POSITION_TYPE_BUY?MathMax(a,b):MathMin(a,b);}
+
+void PositionProtection(ulong ticket){
+   if(!PositionSelectByTicket(ticket))return;
+   ENUM_POSITION_TYPE ty=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double profit=PositionGetDouble(POSITION_PROFIT),open=PositionGetDouble(POSITION_PRICE_OPEN),vol=PositionGetDouble(POSITION_VOLUME);
+   double sl=0;
+   bool recovery=StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0;
+
+   if(recovery){
+      double lockSL=0,trailSL=0;
+      if(RecoveryLockStartUSD>0&&RecoveryLockProfitUSD>0&&profit>=RecoveryLockStartUSD){
+         double dist=MoneyDistance(RecoveryLockProfitUSD,vol);
+         if(dist>0)lockSL=ty==POSITION_TYPE_BUY?open+dist:open-dist;
+      }
+      if(RecoveryTrailStartUSD>0&&RecoveryTrailGivebackUSD>0&&profit>=RecoveryTrailStartUSD){
+         double dist=MoneyDistance(RecoveryTrailGivebackUSD,vol); MqlTick t;
+         if(dist>0&&SymbolInfoTick(_Symbol,t))trailSL=ty==POSITION_TYPE_BUY?t.bid-dist:t.ask+dist;
+      }
+      sl=ProtectiveSL(ty,lockSL,trailSL);
+   }else{
+      double beSL=0,lockSL=0,atrSL=0;
+      if(UseBreakEven&&profit>=BreakEvenStartUSD){
+         double dist=MoneyDistance(BreakEvenOffsetUSD,vol);
+         if(dist>0)beSL=ty==POSITION_TYPE_BUY?open+dist:open-dist;
+      }
+      if(UseProfitLock&&profit>=ProfitLockStartUSD&&ProfitLockStepUSD>0){
+         int n=(int)MathFloor((profit-ProfitLockStartUSD)/ProfitLockStepUSD)+1;
+         double locked=ProfitLockOffsetUSD+(n-1)*ProfitLockStepUSD;
+         double dist=MoneyDistance(locked,vol);
+         if(dist>0)lockSL=ty==POSITION_TYPE_BUY?open+dist:open-dist;
+      }
+      if(UseATRTrailing&&profit>=ATRTrailingHardStartUSD){
+         double atr; MqlTick t;
+         if(GetATR(atr)&&SymbolInfoTick(_Symbol,t))atrSL=ty==POSITION_TYPE_BUY?t.bid-atr*ATRTrailingMultiplier:t.ask+atr*ATRTrailingMultiplier;
+      }
+      sl=ProtectiveSL(ty,beSL,lockSL);
+      sl=ProtectiveSL(ty,sl,atrSL);
+   }
+   if(sl>0)ModifySL(ticket,sl);
+}
+
 void ProfitEngine(){for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;PositionProtection(t);}}
 
 bool RegimeBreakDetected(TrendDirection orig){int n=MathMax(1,RegimeBreakConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;if(orig==TREND_BUY&&!(f<s&&c<tr&&c<ht))return false;if(orig==TREND_SELL&&!(f>s&&c>tr&&c>ht))return false;}return true;}
@@ -168,9 +228,115 @@ bool StrongBuyRegimeExitDetected(){if(!UseStrongBuyRegimeExit)return false;int n
 bool ConfirmHTFRecovery(TrendDirection rev){if(!RecoveryRequireHTFAlignment)return true;double ema,fast,slow;if(!Buf(hHTFEMA,0,1,ema)||!Buf(hHTFFastEMA,0,1,fast)||!Buf(hHTFSlowEMA,0,1,slow))return false;int hHTFADX=iADX(_Symbol,HigherTimeframe,ADXPeriod);if(hHTFADX<0)return false;double adx;if(!Buf(hHTFADX,0,1,adx)){IndicatorRelease(hHTFADX);return false;}IndicatorRelease(hHTFADX);if(adx<RecoveryMinimumADX)return false;double c=iClose(_Symbol,HigherTimeframe,1);if(c<=0)return false;return rev==TREND_SELL?(c<ema&&fast<slow):(c>ema&&fast>slow);}
 
 bool StartRecovery(TrendDirection rev){if(!UseRecovery||CountRecoveryPositions()>=MaxRecoveryPositions)return false;if(RequireHedgingAccountForRecovery&&!IsHedgingAccount())return false;TrendDirection orig=OriginalDirection();if(orig==TREND_NONE||rev==orig)return false;double normal=NormalProfit();if(normal>=0.0||MathAbs(normal)<RecoveryTriggerUSD)return false;if(MaximumExposurePositions>0&&CountPositions()>=MaximumExposurePositions)return false;if(!IsSpreadAcceptable()||!ConfirmHTFRecovery(rev)||!ConfirmReversal(rev))return false;double baseLot=0.0;for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")<0)baseLot+=PositionGetDouble(POSITION_VOLUME);}if(baseLot<=0)return false;double lot=NormalizeLot(MathMin(baseLot*RecoveryMultiplier,MaxRecoveryLot));if(lot<=0)return false;if(OpenTrade(rev,rev==TREND_BUY?"RECOVERY BUY":"RECOVERY SELL",lot,RecoveryMaxLossPerTradeUSD)){Log("RECOVERY OPENED "+(rev==TREND_BUY?"BUY":"SELL")+" normal="+DoubleToString(normal,2));return true;}return false;}
-void RecoveryEngine(){double r=RecoveryProfit(),basket=BasketProfit();if(RecoveryMaxLossPerTradeUSD>0&&r<=-RecoveryMaxLossPerTradeUSD){CloseCampaign();return;}if(RecoveryMaxLossUSD>0&&r<=-RecoveryMaxLossUSD){CloseCampaign();return;}if(RecoveryTargetUSD>0&&r>=RecoveryTargetUSD&&basket>=RecoveryMinProfitUSD){CloseCampaign();return;}ProfitEngine();}
+void RecoveryEngine(){
+   double r=RecoveryProfit(),basket=BasketProfit();
+   if(RecoveryMaxLossPerTradeUSD>0&&r<=-RecoveryMaxLossPerTradeUSD){Log("RECOVERY HARD LOSS EXIT.");CloseCampaign();return;}
+   if(RecoveryMaxLossUSD>0&&r<=-RecoveryMaxLossUSD){Log("RECOVERY CAMPAIGN LOSS EXIT.");CloseCampaign();return;}
+   if(UseRecoveryBasketBreakevenExit&&basket>=0.0&&r>=RecoveryTargetUSD&&basket>=RecoveryMinProfitUSD){Log("RECOVERY BASKET BREAKEVEN/PROFIT EXIT.");CloseCampaign();return;}
+   ProfitEngine();
+}
 
-void ManagePositions(){if(CountPositions()<=0){g_campaignPeak=0;return;}datetime start=CampaignStart();bool holdComplete=start>0&&(Now()-start)>=MinimumHoldSeconds;if(!holdComplete){ProfitEngine();return;}double p=BasketProfit();if(g_campaignPeak==0||p>g_campaignPeak)g_campaignPeak=p;if(CampaignProfitTargetUSD>0&&p>=CampaignProfitTargetUSD){CloseCampaign();return;}if(CampaignProfitTrailStartUSD>0&&CampaignProfitGivebackUSD>0&&g_campaignPeak>=CampaignProfitTrailStartUSD&&g_campaignPeak-p>=CampaignProfitGivebackUSD&&p>0){CloseCampaign();return;}if(MaxCampaignLossUSD>0&&p<=-MaxCampaignLossUSD){CloseCampaign();return;}if(MaxCampaignHours>0&&start>0&&Now()-start>=MaxCampaignHours*3600){CloseCampaign();return;}if(CountRecoveryPositions()>0){RecoveryEngine();return;}TrendDirection orig=OriginalDirection();if(orig!=TREND_NONE){double normal=NormalProfit();if(normal<0){TrendDirection rev=orig==TREND_BUY?TREND_SELL:TREND_BUY;bool reversalConfirmed=ConfirmReversal(rev);if(normal<=-RecoveryTriggerUSD&&reversalConfirmed){if(StartRecovery(rev))return;if(CloseOnStrongReversalIfNoRecovery){CloseCampaign();return;}}if(orig==TREND_BUY&&StrongBuyRegimeExitDetected()){CloseCampaign();return;}if(CloseOnRegimeDamage&&RegimeDamageDetected(orig)&&reversalConfirmed){CloseCampaign();return;}if(RegimeBreakDetected(orig)){if(reversalConfirmed&&StartRecovery(rev))return;if(CloseOnStrongReversalIfNoRecovery&&reversalConfirmed){CloseCampaign();return;}}}}ProfitEngine();}
+double CampaignGiveback(double peak){
+   if(peak>=CampaignPeakLevel4USD&&CampaignGivebackLevel4USD>0)return CampaignGivebackLevel4USD;
+   if(peak>=CampaignPeakLevel3USD&&CampaignGivebackLevel3USD>0)return CampaignGivebackLevel3USD;
+   if(peak>=CampaignPeakLevel2USD&&CampaignGivebackLevel2USD>0)return CampaignGivebackLevel2USD;
+   return CampaignProfitGivebackUSD;
+}
+
+bool CampaignTimeDecayExit(datetime start,double profit){
+   if(start<=0)return false;
+   double hours=(double)(Now()-start)/3600.0;
+   if(CampaignStaleHours<=0||hours<CampaignStaleHours)return false;
+   return profit<=CampaignStaleMinProfitUSD;
+}
+
+int RegimeExitScore(TrendDirection orig){
+   int score=0;
+   double f,f1,s,tr,ht,adx,plusDI,minusDI;
+   if(!Buf(hFastEMA,0,1,f)||!Buf(hFastEMA,0,2,f1)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,adx)||!Buf(hADX,1,1,plusDI)||!Buf(hADX,2,1,minusDI))return 0;
+   double c=iClose(_Symbol,TrendTimeframe,1);
+   if(c<=0)return 0;
+   if(orig==TREND_BUY){
+      if(c<f)score+=1;
+      if(f<f1)score+=1;
+      if(f<s)score+=2;
+      if(c<tr)score+=3;
+      if(c<ht)score+=3;
+      if(minusDI>plusDI)score+=2;
+   }else if(orig==TREND_SELL){
+      if(c>f)score+=1;
+      if(f>f1)score+=1;
+      if(f>s)score+=2;
+      if(c>tr)score+=3;
+      if(c>ht)score+=3;
+      if(plusDI>minusDI)score+=2;
+   }
+   return score;
+}
+
+bool ConfirmExitThesis(TrendDirection orig){
+   int n=MathMax(1,ExitThesisConfirmationBars);
+   for(int sh=1;sh<=n;sh++){
+      double f,f1,s,tr,ht,plusDI,minusDI;
+      if(!Buf(hFastEMA,0,sh,f)||!Buf(hFastEMA,0,sh+1,f1)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,1,sh,plusDI)||!Buf(hADX,2,sh,minusDI))return false;
+      double c=iClose(_Symbol,TrendTimeframe,sh); if(c<=0)return false;
+      if(orig==TREND_BUY){if(!(c<f&&f<f1&&f<s&&c<tr&&c<ht&&minusDI>plusDI))return false;}
+      else if(orig==TREND_SELL){if(!(c>f&&f>f1&&f>s&&c>tr&&c>ht&&plusDI>minusDI))return false;}
+   }
+   return true;
+}
+
+void ManagePositions(){
+   if(CountPositions()<=0){g_campaignPeak=0;return;}
+   datetime start=CampaignStart();
+   bool holdComplete=start>0&&(Now()-start)>=MinimumHoldSeconds;
+   if(!holdComplete){ProfitEngine();return;}
+
+   double p=BasketProfit();
+   if(g_campaignPeak==0||p>g_campaignPeak)g_campaignPeak=p;
+
+   if(CampaignProfitTargetUSD>0&&p>=CampaignProfitTargetUSD){Log("CAMPAIGN TARGET EXIT.");CloseCampaign();return;}
+   double giveback=CampaignGiveback(g_campaignPeak);
+   if(CampaignProfitTrailStartUSD>0&&giveback>0&&g_campaignPeak>=CampaignProfitTrailStartUSD&&g_campaignPeak-p>=giveback&&p>0){Log("DYNAMIC CAMPAIGN GIVEBACK EXIT.");CloseCampaign();return;}
+   if(MaxCampaignLossUSD>0&&p<=-MaxCampaignLossUSD){Log("CAMPAIGN HARD LOSS EXIT.");CloseCampaign();return;}
+   if(CampaignTimeDecayExit(start,p)){Log("STALE CAMPAIGN EXIT.");CloseCampaign();return;}
+
+   if(CountRecoveryPositions()>0){RecoveryEngine();return;}
+
+   TrendDirection orig=OriginalDirection();
+   if(orig!=TREND_NONE){
+      double normal=NormalProfit();
+      if(normal<0){
+         TrendDirection rev=orig==TREND_BUY?TREND_SELL:TREND_BUY;
+         bool reversalConfirmed=ConfirmReversal(rev);
+         int score=RegimeExitScore(orig);
+
+         bool thesisExit=UseHierarchicalExit&&ExitOnThesisInvalidation&&score>=ExitRegimeDamageScore&&ConfirmExitThesis(orig);
+         if(thesisExit){
+            if(normal<=-RecoveryTriggerUSD&&reversalConfirmed&&StartRecovery(rev))return;
+            Log("THESIS INVALIDATION EXIT score="+(string)score);
+            CloseCampaign();return;
+         }
+
+         if(orig==TREND_BUY&&StrongBuyRegimeExitDetected()){Log("STRONG BUY REGIME EXIT.");CloseCampaign();return;}
+         if(CloseOnRegimeDamage&&RegimeDamageDetected(orig)&&reversalConfirmed){
+            if(StartRecovery(rev))return;
+            if(CloseOnStrongReversalIfNoRecovery){Log("REGIME DAMAGE + REVERSAL EXIT.");CloseCampaign();return;}
+         }
+
+         if(normal<=-RecoveryTriggerUSD&&reversalConfirmed){
+            if(StartRecovery(rev))return;
+            if(CloseOnStrongReversalIfNoRecovery){Log("STRONG REVERSAL WITHOUT RECOVERY EXIT.");CloseCampaign();return;}
+         }
+
+         if(RegimeBreakDetected(orig)){
+            if(reversalConfirmed&&StartRecovery(rev))return;
+            if(CloseOnStrongReversalIfNoRecovery&&reversalConfirmed){Log("REGIME BREAK EXIT.");CloseCampaign();return;}
+         }
+      }
+   }
+   ProfitEngine();
+}
 void EntryEngine(TrendDirection d){if(g_equityLocked||g_profitProtectionLocked||g_dailyLockDay==DayKey()||g_closePending||CountPositions()>0)return;if(!CanOpen(d))return;double lot=EntryLot();if(lot<=0)return;if(OpenTrade(d,"TREND "+(d==TREND_BUY?"BUY":"SELL"),lot,MathMin(MaxInitialLossUSD,MaxNormalLossPerTradeUSD))){g_lastEntryTime=Now();g_campaignPeak=0;Log("TREND ENTRY "+(d==TREND_BUY?"BUY":"SELL"));}}
 
 void RiskEngine(){UpdateDailyState();if(WeekendBlocked()){if(CountPositions()>0)CloseCampaign();return;}if(g_equityLocked||g_profitProtectionLocked)return;double e=AccountInfoDouble(ACCOUNT_EQUITY);if(g_peakEquity<=0)g_peakEquity=e;if(e>g_peakEquity)g_peakEquity=e;if(MaxEquityDrawdownPercent>0&&g_peakEquity>0&&(g_peakEquity-e)/g_peakEquity*100.0>=MaxEquityDrawdownPercent){g_equityLocked=true;Log("EQUITY LOCK triggered.");if(ClosePositionsOnEquityProtection)CloseCampaign();return;}if(g_dailyLockDay==0){double loss=g_dailyStartEquity-e,pct=g_dailyStartEquity>0?loss/g_dailyStartEquity*100.0:0;if((MaxDailyLossUSD>0&&loss>=MaxDailyLossUSD)||(MaxDailyLossPercent>0&&pct>=MaxDailyLossPercent)){g_dailyLockDay=DayKey();Log("DAILY LOCK triggered day="+(string)g_dailyLockDay);if(ClosePositionsOnDailyProtection)CloseCampaign();return;}}if(UseHardNormalUSDLoss&&MaxNormalLossPerTradeUSD>0){for(int i=PositionsTotal()-1;i>=0;i--){ulong t=PositionGetTicket(i);if(t==0||!PositionSelectByTicket(t))continue;if(PositionGetString(POSITION_SYMBOL)!=_Symbol||(long)PositionGetInteger(POSITION_MAGIC)!=MagicNumber)continue;if(StringFind(PositionGetString(POSITION_COMMENT),"RECOVERY")>=0)continue;double pp=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);if(pp<=-MaxNormalLossPerTradeUSD){TrendDirection orig=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY?TREND_BUY:TREND_SELL;TrendDirection rev=orig==TREND_BUY?TREND_SELL:TREND_BUY;bool recoveryWindow=UseRecovery&&IsHedgingAccount()&&CountRecoveryPositions()==0&&MathAbs(pp)>=RecoveryTriggerUSD&&ConfirmReversal(rev);if(recoveryWindow&&StartRecovery(rev)){Log("HARD LOSS HANDLED BY RECOVERY.");continue;}Log("HARD NORMAL USD LOSS - FORCE CLOSE.");CloseCampaign();return;}}}}
