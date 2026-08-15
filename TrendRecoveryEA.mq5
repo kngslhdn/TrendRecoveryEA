@@ -1,6 +1,6 @@
 #property strict
-#property version "1.41"
-#property description "TrendRecoveryEA v1.41 - hard USD protection, functional recovery, safer profit state."
+#property version "1.42"
+#property description "TrendRecoveryEA v1.42 - asymmetric BUY/SELL trend quality filter."
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -13,6 +13,9 @@ input int SlowEMAPeriod=50;
 input int TrendEMAPeriod=200;
 input int ADXPeriod=14;
 input double MinimumADX=20.0;
+input bool UseAsymmetricTrendFilter=true;
+input double BuyMinimumADX=23.0;
+input double SellMinimumADX=20.0;
 input double MaximumATRPoints=0.0;
 input bool UseRSIConfirmation=false;
 input int RSIPeriod=14;
@@ -110,7 +113,7 @@ bool g_closePending=false,g_equityLocked=false,g_profitProtectionLocked=false;
 long g_dailyLockDay=0;
 double g_peakEquity=0.0,g_dailyStartEquity=0.0,g_profitPeak=0.0,g_profitStart=0.0,g_campaignPeak=0.0;
 
-void Log(string s){if(EnableLogging)Print("[TrendRecoveryEA v1.41] ",s);}
+void Log(string s){if(EnableLogging)Print("[TrendRecoveryEA v1.42] ",s);}
 datetime Now(){datetime t=TimeTradeServer();if(t<=0)t=TimeCurrent();return t;}
 long DayKey(){MqlDateTime d;TimeToStruct(Now(),d);return (long)d.year*10000+(long)d.mon*100+d.day;}
 int VolumeDigits(){double x=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);int d=0;while(d<8&&MathAbs(x-MathRound(x))>1e-10){x*=10.0;d++;}return d;}
@@ -124,13 +127,14 @@ bool IsTradingSession(){if(!UseTradingSession)return true;MqlDateTime d;TimeToSt
 bool IsNewBar(){datetime t=iTime(_Symbol,TrendTimeframe,0);if(t<=0)return false;if(t!=g_lastBarTime){g_lastBarTime=t;return true;}return false;}
 bool Buf(int h,int b,int sh,double &v){if(h<0)return false;double x[1];if(CopyBuffer(h,b,sh,1,x)!=1)return false;v=x[0];return true;}
 bool GetATR(double &v){return Buf(hATR,0,1,v);}
+double TrendADXThreshold(TrendDirection dir){if(!UseAsymmetricTrendFilter)return MinimumADX;return dir==TREND_BUY?MathMax(MinimumADX,BuyMinimumADX):MathMax(MinimumADX,SellMinimumADX);}
 
 void UpdateDailyState(){long day=DayKey();if(g_dailyStartEquity<=0.0){g_dailyStartEquity=AccountInfoDouble(ACCOUNT_EQUITY);g_dailyLockDay=0;}if(g_dailyLockDay!=0&&g_dailyLockDay!=day){g_dailyLockDay=0;g_dailyStartEquity=AccountInfoDouble(ACCOUNT_EQUITY);Log("New trading day: DAILY LOCK RESET.");}}
 bool WeekendBlocked(){if(!UseWeekendProtection)return false;MqlDateTime d;TimeToStruct(Now(),d);if(d.day_of_week==6)return true;if(d.day_of_week==0&&BlockSundayTrading)return true;if(d.day_of_week==5)return d.hour*60+d.min>=FridayCloseHour*60+FridayCloseMinute;return false;}
 
-TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0||a<MinimumADX)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
+TrendDirection DetectTrend(){double f,s,tr,ht,a,atr,r;if(!Buf(hFastEMA,0,1,f)||!Buf(hSlowEMA,0,1,s)||!Buf(hTrendEMA,0,1,tr)||!Buf(hHTFEMA,0,1,ht)||!Buf(hADX,0,1,a)||!GetATR(atr))return TREND_NONE;double c=iClose(_Symbol,TrendTimeframe,1);if(c<=0)return TREND_NONE;if(MaximumATRPoints>0&&atr/_Point>MaximumATRPoints)return TREND_NONE;bool buy=f>s&&c>tr&&c>ht,sell=f<s&&c<tr&&c<ht;if(buy&&a<TrendADXThreshold(TREND_BUY))buy=false;if(sell&&a<TrendADXThreshold(TREND_SELL))sell=false;if(UseRSIConfirmation){if(!Buf(hRSI,0,1,r))return TREND_NONE;buy=buy&&r>=RSIForBuy;sell=sell&&r<=RSIForSell;}if(buy)return TREND_BUY;if(sell)return TREND_SELL;return TREND_NONE;}
 
-bool ConfirmTrend(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<MinimumADX)return false;bool ok=dir==TREND_BUY?(f>s&&c>tr&&c>ht):(f<s&&c<tr&&c<ht);if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&(dir==TREND_BUY?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
+bool ConfirmTrend(TrendDirection dir){int n=MathMax(1,ReversalConfirmationBars);double adxThreshold=TrendADXThreshold(dir);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a,r;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a))return false;double c=iClose(_Symbol,TrendTimeframe,sh);if(c<=0||a<adxThreshold)return false;bool ok=dir==TREND_BUY?(f>s&&c>tr&&c>ht):(f<s&&c<tr&&c<ht);if(UseRSIConfirmation){if(!Buf(hRSI,0,sh,r))return false;ok=ok&&(dir==TREND_BUY?r>=RSIForBuy:r<=RSIForSell);}if(!ok)return false;}return true;}
 
 bool ConfirmReversal(TrendDirection dir){int n=MathMax(2,RecoveryConfirmationBars);for(int sh=1;sh<=n;sh++){double f,s,tr,ht,a;if(!Buf(hFastEMA,0,sh,f)||!Buf(hSlowEMA,0,sh,s)||!Buf(hTrendEMA,0,sh,tr)||!Buf(hHTFEMA,0,sh,ht)||!Buf(hADX,0,sh,a))return false;double c=iClose(_Symbol,TrendTimeframe,sh),o=iOpen(_Symbol,TrendTimeframe,sh);if(c<=0||o<=0||a<MinimumADX)return false;bool ok=dir==TREND_BUY?(c>o&&c>f&&f>s):(c<o&&c<f&&f<s);if(!ok)return false;}double f1,f2,f3;if(!Buf(hFastEMA,0,1,f1)||!Buf(hFastEMA,0,2,f2)||!Buf(hFastEMA,0,3,f3))return false;return dir==TREND_BUY?(f1>=f2&&f2>=f3):(f1<=f2&&f2<=f3);}
 
